@@ -4,7 +4,7 @@
 
 `nut-master` 通过 SNMP 读取 UPS 状态；`nut-slave` 主动注册到 master；当满足关机策略时，master 向 slave 下发关机指令。当前版本已支持 `dry_run`，可先验证链路而不真正关机。
 
-仓库已包含：示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本、tar.gz 发布打包脚本，以及 GitHub Actions 构建工作流。
+仓库已包含：示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本、tar.gz 发布打包脚本，以及 GitHub Actions 构建 / tag 发布工作流。
 
 ## 项目结构
 
@@ -165,6 +165,8 @@ make build-linux
 ```bash
 make package
 ```
+
+推送 `v*` 格式 tag（例如 `v0.1.0`）后，GitHub Actions 会自动构建 tar.gz 并创建 GitHub Release。
 
 ## systemd 部署
 

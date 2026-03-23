@@ -29,9 +29,6 @@ jobs:
       - name: Build Linux artifacts
         run: ./scripts/build-linux.sh
 
-      - name: Package release archives
-        run: VERSION=${GITHUB_SHA} ./scripts/package-release.sh
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -39,4 +36,3 @@ jobs:
           path: |
             dist/linux-amd64
             dist/linux-arm64
-            dist/release
