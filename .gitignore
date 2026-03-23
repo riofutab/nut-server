@@ -1,0 +1,16 @@
+# Binaries and build artifacts
+bin/
+dist/
+
+# Local runtime config
+config/*.yaml
+
+# Claude local workspace
+.claude/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

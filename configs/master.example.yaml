@@ -1,0 +1,19 @@
+listen_addr: ":9000"
+auth_tokens:
+  - "replace-with-strong-token"
+poll_interval: "10s"
+dry_run: true
+shutdown_policy:
+  require_on_battery: true
+  min_battery_charge: 30
+  min_runtime_seconds: 300
+  shutdown_reason: "UPS battery threshold reached"
+snmp:
+  target: "192.168.1.10"
+  port: 161
+  community: "public"
+  version: "2c"
+  timeout_seconds: 2
+  status_oid: ".1.3.6.1.2.1.33.1.2.1.0"
+  charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
+  runtime_seconds_oid: ".1.3.6.1.2.1.33.1.2.3.0"

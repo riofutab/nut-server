@@ -1,0 +1,15 @@
+[Unit]
+Description=nut slave service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/lib/nut-server
+ExecStart=/usr/local/bin/nut-slave -config /etc/nut-server/slave.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
