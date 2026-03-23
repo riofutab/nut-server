@@ -9,7 +9,7 @@ func ShouldShutdown(status UPSStatus, policy config.ShutdownPolicy) bool {
 	if policy.MinBatteryCharge > 0 && status.BatteryCharge > policy.MinBatteryCharge {
 		return false
 	}
-	if policy.MinRuntimeSeconds > 0 && status.RuntimeSeconds > policy.MinRuntimeSeconds {
+	if policy.MinRuntimeMinutes > 0 && status.RuntimeMinutes > policy.MinRuntimeMinutes {
 		return false
 	}
 	return true

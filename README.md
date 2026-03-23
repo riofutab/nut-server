@@ -4,6 +4,11 @@
 
 `nut-master` 通过 SNMP 读取 UPS 状态；`nut-slave` 主动注册到 master；当满足关机策略时，master 向 slave 下发关机指令。当前版本已支持 `dry_run`，可先验证链路而不真正关机。
 
+当前默认按 UPS-MIB 方式读取：
+- `output_source_oid` 判断是否切到 battery
+- `charge_oid` 读取电池电量百分比
+- `runtime_minutes_oid` 读取剩余运行时间（分钟）
+
 仓库已包含：示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本、tar.gz 发布打包脚本，以及 GitHub Actions 构建 / tag 发布工作流。
 
 ## 项目结构
@@ -97,8 +102,10 @@ go run ./cmd/nut-slave -config config/slave.yaml
 - `dry_run`: 是否仅验证链路而不执行真实关机
 - `shutdown_policy.require_on_battery`: 是否要求 UPS 处于电池供电
 - `shutdown_policy.min_battery_charge`: 最低电量阈值
-- `shutdown_policy.min_runtime_seconds`: 最低剩余运行时间阈值
-- `snmp.*`: UPS 的 SNMP 连接与 OID 配置
+- `shutdown_policy.min_runtime_minutes`: 最低剩余运行时间阈值（单位：分钟）
+- `snmp.output_source_oid`: 用于判断 UPS 当前输出来源，`5` 视为 battery
+- `snmp.charge_oid`: UPS 电池电量百分比 OID
+- `snmp.runtime_minutes_oid`: UPS 剩余运行时间 OID（单位：分钟）
 
 ### slave
 
@@ -183,14 +190,25 @@ make package
 ### 安装 master
 
 ```bash
-sudo ./scripts/install-master.sh
+sudo ./scripts/install-master.sh \
+  --token your-token \
+  --snmp-target 10.0.0.31 \
+  --listen-addr :9000 \
+  --snmp-community public
 ```
+
+安装脚本会直接生成 `/etc/nut-server/master.yaml`；如需调整 `dry_run`、阈值或 OID，再手工编辑配置。
 
 ### 安装 slave
 
 ```bash
-sudo ./scripts/install-slave.sh
+sudo ./scripts/install-slave.sh \
+  --node-id slave-01 \
+  --master-addr 10.0.0.10:9000 \
+  --token your-token
 ```
+
+安装脚本会直接生成 `/etc/nut-server/slave.yaml`，因此执行后即可启动；如需调整 `dry_run` 或 `shutdown_command`，再手工编辑配置。
 
 安装脚本既可以在源码根目录运行，也可以在 `dist/linux-amd64/` 或 `dist/linux-arm64/` 发布目录中运行。
 

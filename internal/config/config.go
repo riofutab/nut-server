@@ -20,7 +20,7 @@ type MasterConfig struct {
 type ShutdownPolicy struct {
 	RequireOnBattery  bool   `yaml:"require_on_battery"`
 	MinBatteryCharge  int    `yaml:"min_battery_charge"`
-	MinRuntimeSeconds int    `yaml:"min_runtime_seconds"`
+	MinRuntimeMinutes int    `yaml:"min_runtime_minutes"`
 	ShutdownReason    string `yaml:"shutdown_reason"`
 }
 
@@ -30,9 +30,9 @@ type SNMPConfig struct {
 	Community         string `yaml:"community"`
 	Version           string `yaml:"version"`
 	TimeoutSeconds    int    `yaml:"timeout_seconds"`
-	StatusOID         string `yaml:"status_oid"`
+	OutputSourceOID   string `yaml:"output_source_oid"`
 	ChargeOID         string `yaml:"charge_oid"`
-	RuntimeSecondsOID string `yaml:"runtime_seconds_oid"`
+	RuntimeMinutesOID string `yaml:"runtime_minutes_oid"`
 }
 
 type SlaveConfig struct {

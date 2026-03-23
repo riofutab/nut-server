@@ -12,7 +12,7 @@ import (
 type UPSStatus struct {
 	OnBattery      bool
 	BatteryCharge  int
-	RuntimeSeconds int
+	RuntimeMinutes int
 }
 
 func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
@@ -29,23 +29,23 @@ func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
 	}
 	defer client.Conn.Close()
 
-	status, err := getInt(client, cfg.StatusOID)
+	outputSource, err := getInt(client, cfg.OutputSourceOID)
 	if err != nil {
-		return UPSStatus{}, fmt.Errorf("read status oid: %w", err)
+		return UPSStatus{}, fmt.Errorf("read output source oid: %w", err)
 	}
 	charge, err := getInt(client, cfg.ChargeOID)
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read charge oid: %w", err)
 	}
-	runtimeSeconds, err := getInt(client, cfg.RuntimeSecondsOID)
+	runtimeMinutes, err := getInt(client, cfg.RuntimeMinutesOID)
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read runtime oid: %w", err)
 	}
 
 	return UPSStatus{
-		OnBattery:      status != 2,
+		OnBattery:      outputSource == 5,
 		BatteryCharge:  charge,
-		RuntimeSeconds: runtimeSeconds,
+		RuntimeMinutes: runtimeMinutes,
 	}, nil
 }
 
