@@ -59,6 +59,7 @@ fi
 find_binary() {
   for candidate in \
     "$ROOT_DIR/nut-master" \
+    "$ROOT_DIR/bin/nut-master" \
     "$ROOT_DIR/dist/linux-amd64/nut-master" \
     "$ROOT_DIR/dist/linux-arm64/nut-master"
   do
@@ -74,6 +75,7 @@ find_file() {
   target="$1"
   for candidate in \
     "$ROOT_DIR/$target" \
+    "$ROOT_DIR/systemd/$(basename "$target")" \
     "$ROOT_DIR/dist/linux-amd64/$target" \
     "$ROOT_DIR/dist/linux-arm64/$target"
   do

@@ -6,12 +6,16 @@ import (
 	"os/exec"
 )
 
-type ShutdownExecutor struct {
+type ShutdownExecutor interface {
+	Execute(logger *log.Logger) error
+}
+
+type CommandShutdownExecutor struct {
 	Command []string
 	DryRun  bool
 }
 
-func (s ShutdownExecutor) Execute(logger *log.Logger) error {
+func (s CommandShutdownExecutor) Execute(logger *log.Logger) error {
 	if len(s.Command) == 0 {
 		return fmt.Errorf("shutdown command is empty")
 	}

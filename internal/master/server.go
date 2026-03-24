@@ -16,17 +16,26 @@ import (
 )
 
 type Server struct {
-	cfg              config.MasterConfig
-	registry         *Registry
-	commandSeq       atomic.Uint64
-	shutdownIssued   atomic.Bool
-	shutdownIssuedMu sync.Mutex
+	cfg            config.MasterConfig
+	registry       *Registry
+	commandSeq     atomic.Uint64
+	shutdownIssued atomic.Bool
+	commandMu      sync.Mutex
+	commands       map[string]*shutdownCommandState
+	activeCommand  string
+}
+
+type shutdownCommandState struct {
+	Message     protocol.ShutdownMessage
+	TargetNodes map[string]struct{}
+	NodeUpdates map[string]protocol.ShutdownAckMessage
 }
 
 func NewServer(cfg config.MasterConfig) *Server {
 	return &Server{
 		cfg:      cfg,
 		registry: NewRegistry(),
+		commands: make(map[string]*shutdownCommandState),
 	}
 }
 
@@ -53,7 +62,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	client := NewClient(conn)
 	defer func() {
 		if client.NodeID != "" {
-			s.registry.Remove(client.NodeID)
+			s.registry.RemoveIfMatch(client.NodeID, client)
 		}
 		_ = client.Close()
 	}()
@@ -81,6 +90,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 	log.Printf("slave registered node_id=%s hostname=%s", client.NodeID, client.Hostname)
+	if err := s.replayPendingShutdown(client); err != nil {
+		log.Printf("replay pending shutdown to %s failed: %v", client.NodeID, err)
+		return
+	}
 
 	for {
 		env, err := client.ReadEnvelope()
@@ -134,7 +147,8 @@ func (s *Server) handleEnvelope(client *Client, env protocol.Envelope) error {
 		if err := json.Unmarshal(payload, &ack); err != nil {
 			return err
 		}
-		log.Printf("shutdown ack node_id=%s command_id=%s accepted=%t message=%s", ack.NodeID, ack.CommandID, ack.Accepted, ack.Message)
+		s.recordShutdownUpdate(ack)
+		log.Printf("shutdown update node_id=%s command_id=%s status=%s message=%s", ack.NodeID, ack.CommandID, ack.Status, ack.Message)
 		return nil
 	default:
 		return fmt.Errorf("unsupported message type %s", env.Type)
@@ -160,27 +174,29 @@ func (s *Server) evaluateUPS() error {
 	}
 	if ShouldShutdown(status, s.cfg.ShutdownPolicy) {
 		if s.shutdownIssued.CompareAndSwap(false, true) {
-			commandID := fmt.Sprintf("shutdown-%d", s.commandSeq.Add(1))
-			if s.cfg.DryRun {
-				log.Printf("UPS policy triggered in dry-run mode, broadcasting shutdown command_id=%s", commandID)
-			} else {
-				log.Printf("UPS policy triggered, broadcasting shutdown command_id=%s", commandID)
+			message := protocol.ShutdownMessage{
+				CommandID: fmt.Sprintf("shutdown-%d", s.commandSeq.Add(1)),
+				Reason:    s.cfg.ShutdownPolicy.ShutdownReason,
+				DryRun:    s.cfg.DryRun,
+				IssuedAt:  time.Now().UTC(),
 			}
-			return s.BroadcastShutdown(commandID, s.cfg.ShutdownPolicy.ShutdownReason)
+			if s.cfg.DryRun {
+				log.Printf("UPS policy triggered in dry-run mode, broadcasting shutdown command_id=%s", message.CommandID)
+			} else {
+				log.Printf("UPS policy triggered, broadcasting shutdown command_id=%s", message.CommandID)
+			}
+			return s.BroadcastShutdown(message)
 		}
 	}
 	return nil
 }
 
-func (s *Server) BroadcastShutdown(commandID, reason string) error {
-	message := protocol.ShutdownMessage{
-		CommandID: commandID,
-		Reason:    reason,
-		DryRun:    s.cfg.DryRun,
-		IssuedAt:  time.Now().UTC(),
-	}
+func (s *Server) BroadcastShutdown(message protocol.ShutdownMessage) error {
+	targets := s.registry.List()
+	s.rememberShutdownCommand(message, targets)
+
 	var firstErr error
-	for _, client := range s.registry.List() {
+	for _, client := range targets {
 		if err := client.Send(protocol.TypeShutdown, message); err != nil {
 			log.Printf("send shutdown to %s failed: %v", client.NodeID, err)
 			if firstErr == nil {
@@ -189,10 +205,75 @@ func (s *Server) BroadcastShutdown(commandID, reason string) error {
 			continue
 		}
 		if s.cfg.DryRun {
-			log.Printf("sent dry-run shutdown to node_id=%s command_id=%s", client.NodeID, commandID)
+			log.Printf("sent dry-run shutdown to node_id=%s command_id=%s", client.NodeID, message.CommandID)
 		} else {
-			log.Printf("sent shutdown to node_id=%s command_id=%s", client.NodeID, commandID)
+			log.Printf("sent shutdown to node_id=%s command_id=%s", client.NodeID, message.CommandID)
 		}
 	}
 	return firstErr
+}
+
+func (s *Server) rememberShutdownCommand(message protocol.ShutdownMessage, targets []*Client) {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+
+	targetNodes := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if target == nil || target.NodeID == "" {
+			continue
+		}
+		targetNodes[target.NodeID] = struct{}{}
+	}
+
+	s.commands[message.CommandID] = &shutdownCommandState{
+		Message:     message,
+		TargetNodes: targetNodes,
+		NodeUpdates: make(map[string]protocol.ShutdownAckMessage),
+	}
+	s.activeCommand = message.CommandID
+}
+
+func (s *Server) recordShutdownUpdate(update protocol.ShutdownAckMessage) {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	command, ok := s.commands[update.CommandID]
+	if !ok {
+		return
+	}
+	command.NodeUpdates[update.NodeID] = update
+}
+
+func (s *Server) replayPendingShutdown(client *Client) error {
+	s.commandMu.Lock()
+	commandID := s.activeCommand
+	if commandID == "" {
+		s.commandMu.Unlock()
+		return nil
+	}
+	command, ok := s.commands[commandID]
+	if !ok {
+		s.commandMu.Unlock()
+		return nil
+	}
+	if _, wasTarget := command.TargetNodes[client.NodeID]; !wasTarget {
+		s.commandMu.Unlock()
+		return nil
+	}
+	lastUpdate, hasUpdate := command.NodeUpdates[client.NodeID]
+	message := command.Message
+	s.commandMu.Unlock()
+
+	if hasUpdate && isTerminalShutdownStatus(lastUpdate.Status) {
+		return nil
+	}
+	return client.Send(protocol.TypeShutdown, message)
+}
+
+func isTerminalShutdownStatus(status string) bool {
+	switch status {
+	case protocol.ShutdownStatusExecuted, protocol.ShutdownStatusFailed:
+		return true
+	default:
+		return false
+	}
 }

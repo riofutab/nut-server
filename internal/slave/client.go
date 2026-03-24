@@ -15,20 +15,26 @@ import (
 )
 
 type Client struct {
-	cfg             config.SlaveConfig
-	hostname        string
-	shutdown        ShutdownExecutor
-	executedMu      sync.Mutex
-	executedCommand map[string]struct{}
+	cfg           config.SlaveConfig
+	hostname      string
+	shutdown      ShutdownExecutor
+	commandMu     sync.Mutex
+	commandStates map[string]protocol.ShutdownAckMessage
+}
+
+type connectionSession struct {
+	reader *bufio.Reader
+	writer *bufio.Writer
+	mu     sync.Mutex
 }
 
 func NewClient(cfg config.SlaveConfig) *Client {
 	hostname, _ := os.Hostname()
 	return &Client{
-		cfg:             cfg,
-		hostname:        hostname,
-		shutdown:        ShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
-		executedCommand: make(map[string]struct{}),
+		cfg:           cfg,
+		hostname:      hostname,
+		shutdown:      CommandShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
+		commandStates: make(map[string]protocol.ShutdownAckMessage),
 	}
 }
 
@@ -48,38 +54,29 @@ func (c *Client) runOnce() error {
 	}
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-	encoder := json.NewEncoder(writer)
+	session := newConnectionSession(conn)
 
-	register := protocol.Envelope{
-		Type: protocol.TypeRegister,
-		Data: protocol.RegisterMessage{
+	if err := session.Send(protocol.TypeRegister, protocol.RegisterMessage{
 			NodeID:   c.cfg.NodeID,
 			Hostname: c.hostname,
 			Token:    c.cfg.Token,
-		},
-	}
-	if err := encoder.Encode(register); err != nil {
+		}); err != nil {
 		return fmt.Errorf("send register: %w", err)
 	}
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("flush register: %w", err)
-	}
 
-	if err := c.expectRegisterAck(reader); err != nil {
+	if err := c.expectRegisterAck(session.reader); err != nil {
 		return err
 	}
 	log.Printf("registered to master %s as %s", c.cfg.MasterAddr, c.cfg.NodeID)
 
-	go c.runPingLoop(writer)
+	go c.runPingLoop(session)
 
 	for {
-		env, err := readEnvelope(reader)
+		env, err := readEnvelope(session.reader)
 		if err != nil {
 			return err
 		}
-		if err := c.handleEnvelope(env, encoder, writer); err != nil {
+		if err := c.handleEnvelope(env, session); err != nil {
 			return err
 		}
 	}
@@ -103,37 +100,55 @@ func (c *Client) expectRegisterAck(reader *bufio.Reader) error {
 	return nil
 }
 
-func (c *Client) handleEnvelope(env protocol.Envelope, encoder *json.Encoder, writer *bufio.Writer) error {
+func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSession) error {
 	switch env.Type {
 	case protocol.TypeShutdown:
 		var shutdown protocol.ShutdownMessage
 		if err := decodePayload(env.Data, &shutdown); err != nil {
 			return err
 		}
-		ack := protocol.ShutdownAckMessage{
+		if existing, ok := c.getCommandState(shutdown.CommandID); ok {
+			return session.Send(protocol.TypeShutdownAck, existing)
+		}
+
+		accepted := protocol.ShutdownAckMessage{
 			CommandID: shutdown.CommandID,
 			NodeID:    c.cfg.NodeID,
-			Accepted:  true,
-			Message:   "shutdown accepted",
+			Status:    protocol.ShutdownStatusAccepted,
+			Message:   "shutdown command accepted",
 			AckedAt:   time.Now().UTC(),
 		}
-		if shutdown.DryRun || c.cfg.DryRun {
-			ack.Message = "dry-run shutdown acknowledged"
-			log.Printf("dry-run shutdown command received node_id=%s command_id=%s reason=%s", c.cfg.NodeID, shutdown.CommandID, shutdown.Reason)
-		} else if c.alreadyExecuted(shutdown.CommandID) {
-			ack.Message = "duplicate shutdown command ignored"
-		} else {
-			c.markExecuted(shutdown.CommandID)
-			go func() {
-				if err := c.shutdown.Execute(log.Default()); err != nil {
-					log.Printf("execute shutdown command failed: %v", err)
-				}
-			}()
-		}
-		if err := encoder.Encode(protocol.Envelope{Type: protocol.TypeShutdownAck, Data: ack}); err != nil {
+		c.setCommandState(accepted)
+		if err := session.Send(protocol.TypeShutdownAck, accepted); err != nil {
 			return err
 		}
-		return writer.Flush()
+
+		if shutdown.DryRun || c.cfg.DryRun {
+			log.Printf("dry-run shutdown command received node_id=%s command_id=%s reason=%s", c.cfg.NodeID, shutdown.CommandID, shutdown.Reason)
+			executed := protocol.ShutdownAckMessage{
+				CommandID: shutdown.CommandID,
+				NodeID:    c.cfg.NodeID,
+				Status:    protocol.ShutdownStatusExecuted,
+				Message:   "dry-run shutdown simulated",
+				AckedAt:   time.Now().UTC(),
+			}
+			c.setCommandState(executed)
+			return session.Send(protocol.TypeShutdownAck, executed)
+		}
+
+		executing := protocol.ShutdownAckMessage{
+			CommandID: shutdown.CommandID,
+			NodeID:    c.cfg.NodeID,
+			Status:    protocol.ShutdownStatusExecuting,
+			Message:   "executing shutdown command",
+			AckedAt:   time.Now().UTC(),
+		}
+		c.setCommandState(executing)
+		if err := session.Send(protocol.TypeShutdownAck, executing); err != nil {
+			return err
+		}
+		go c.executeShutdown(session, shutdown)
+		return nil
 	case protocol.TypeError:
 		var msg protocol.ErrorMessage
 		if err := decodePayload(env.Data, &msg); err != nil {
@@ -145,32 +160,47 @@ func (c *Client) handleEnvelope(env protocol.Envelope, encoder *json.Encoder, wr
 	}
 }
 
-func (c *Client) runPingLoop(writer *bufio.Writer) {
+func (c *Client) runPingLoop(session *connectionSession) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
-	encoder := json.NewEncoder(writer)
 
 	for range ticker.C {
-		if err := encoder.Encode(protocol.Envelope{Type: protocol.TypePing, Data: protocol.PingMessage{SentAt: time.Now().UTC()}}); err != nil {
-			return
-		}
-		if err := writer.Flush(); err != nil {
+		if err := session.Send(protocol.TypePing, protocol.PingMessage{SentAt: time.Now().UTC()}); err != nil {
 			return
 		}
 	}
 }
 
-func (c *Client) alreadyExecuted(commandID string) bool {
-	c.executedMu.Lock()
-	defer c.executedMu.Unlock()
-	_, ok := c.executedCommand[commandID]
-	return ok
+func (c *Client) executeShutdown(session *connectionSession, shutdown protocol.ShutdownMessage) {
+	update := protocol.ShutdownAckMessage{
+		CommandID: shutdown.CommandID,
+		NodeID:    c.cfg.NodeID,
+		Status:    protocol.ShutdownStatusExecuted,
+		Message:   "shutdown command completed",
+		AckedAt:   time.Now().UTC(),
+	}
+	if err := c.shutdown.Execute(log.Default()); err != nil {
+		update.Status = protocol.ShutdownStatusFailed
+		update.Message = err.Error()
+		update.AckedAt = time.Now().UTC()
+	}
+	c.setCommandState(update)
+	if err := session.Send(protocol.TypeShutdownAck, update); err != nil {
+		log.Printf("report shutdown status failed node_id=%s command_id=%s status=%s: %v", c.cfg.NodeID, shutdown.CommandID, update.Status, err)
+	}
 }
 
-func (c *Client) markExecuted(commandID string) {
-	c.executedMu.Lock()
-	defer c.executedMu.Unlock()
-	c.executedCommand[commandID] = struct{}{}
+func (c *Client) getCommandState(commandID string) (protocol.ShutdownAckMessage, bool) {
+	c.commandMu.Lock()
+	defer c.commandMu.Unlock()
+	state, ok := c.commandStates[commandID]
+	return state, ok
+}
+
+func (c *Client) setCommandState(update protocol.ShutdownAckMessage) {
+	c.commandMu.Lock()
+	defer c.commandMu.Unlock()
+	c.commandStates[update.CommandID] = update
 }
 
 func readEnvelope(reader *bufio.Reader) (protocol.Envelope, error) {
@@ -191,4 +221,22 @@ func decodePayload(data interface{}, dst interface{}) error {
 		return err
 	}
 	return json.Unmarshal(payload, dst)
+}
+
+func newConnectionSession(conn net.Conn) *connectionSession {
+	return &connectionSession{
+		reader: bufio.NewReader(conn),
+		writer: bufio.NewWriter(conn),
+	}
+}
+
+func (s *connectionSession) Send(messageType string, payload interface{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	envelope := protocol.Envelope{Type: messageType, Data: payload}
+	if err := json.NewEncoder(s.writer).Encode(envelope); err != nil {
+		return err
+	}
+	return s.writer.Flush()
 }

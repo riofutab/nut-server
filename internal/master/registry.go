@@ -26,6 +26,16 @@ func (r *Registry) Remove(nodeID string) {
 	delete(r.clients, nodeID)
 }
 
+func (r *Registry) RemoveIfMatch(nodeID string, client *Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.clients[nodeID]
+	if !ok || current != client {
+		return
+	}
+	delete(r.clients, nodeID)
+}
+
 func (r *Registry) Get(nodeID string) (*Client, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

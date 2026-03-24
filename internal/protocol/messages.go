@@ -11,6 +11,13 @@ const (
 	TypeError       = "error"
 )
 
+const (
+	ShutdownStatusAccepted  = "accepted"
+	ShutdownStatusExecuting = "executing"
+	ShutdownStatusExecuted  = "executed"
+	ShutdownStatusFailed    = "failed"
+)
+
 type Envelope struct {
 	Type string      `json:"type"`
 	Data interface{} `json:"data,omitempty"`
@@ -42,7 +49,7 @@ type ShutdownMessage struct {
 type ShutdownAckMessage struct {
 	CommandID string    `json:"command_id"`
 	NodeID    string    `json:"node_id"`
-	Accepted  bool      `json:"accepted"`
+	Status    string    `json:"status"`
 	Message   string    `json:"message,omitempty"`
 	AckedAt   time.Time `json:"acked_at"`
 }
