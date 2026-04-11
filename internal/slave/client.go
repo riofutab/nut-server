@@ -2,6 +2,7 @@ package slave
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,11 +16,13 @@ import (
 )
 
 type Client struct {
-	cfg           config.SlaveConfig
-	hostname      string
-	shutdown      ShutdownExecutor
-	commandMu     sync.Mutex
-	commandStates map[string]protocol.ShutdownAckMessage
+	cfg               config.SlaveConfig
+	hostname          string
+	shutdown          ShutdownExecutor
+	commandMu         sync.Mutex
+	commandStates     map[string]protocol.ShutdownAckMessage
+	executingCommands map[string]struct{}
+	tlsConfig         *tls.Config
 }
 
 type connectionSession struct {
@@ -30,12 +33,15 @@ type connectionSession struct {
 
 func NewClient(cfg config.SlaveConfig) *Client {
 	hostname, _ := os.Hostname()
-	return &Client{
-		cfg:           cfg,
-		hostname:      hostname,
-		shutdown:      CommandShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
-		commandStates: make(map[string]protocol.ShutdownAckMessage),
+	client := &Client{
+		cfg:               cfg,
+		hostname:          hostname,
+		shutdown:          CommandShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
+		commandStates:     make(map[string]protocol.ShutdownAckMessage),
+		executingCommands: make(map[string]struct{}),
 	}
+	client.loadState()
+	return client
 }
 
 func (c *Client) Run() error {
@@ -47,8 +53,22 @@ func (c *Client) Run() error {
 	}
 }
 
+func (c *Client) dial() (net.Conn, error) {
+	if !c.cfg.TLS.EnabledForClient() {
+		return net.Dial("tcp", c.cfg.MasterAddr)
+	}
+	if c.tlsConfig == nil {
+		tlsConfig, err := c.cfg.TLS.ClientTLSConfig()
+		if err != nil {
+			return nil, err
+		}
+		c.tlsConfig = tlsConfig
+	}
+	return tls.Dial("tcp", c.cfg.MasterAddr, c.tlsConfig)
+}
+
 func (c *Client) runOnce() error {
-	conn, err := net.Dial("tcp", c.cfg.MasterAddr)
+	conn, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("dial master %s: %w", c.cfg.MasterAddr, err)
 	}
@@ -57,17 +77,18 @@ func (c *Client) runOnce() error {
 	session := newConnectionSession(conn)
 
 	if err := session.Send(protocol.TypeRegister, protocol.RegisterMessage{
-			NodeID:   c.cfg.NodeID,
-			Hostname: c.hostname,
-			Token:    c.cfg.Token,
-		}); err != nil {
+		NodeID:   c.cfg.NodeID,
+		Hostname: c.hostname,
+		Token:    c.cfg.Token,
+		Tags:     c.cfg.Tags,
+	}); err != nil {
 		return fmt.Errorf("send register: %w", err)
 	}
 
 	if err := c.expectRegisterAck(session.reader); err != nil {
 		return err
 	}
-	log.Printf("registered to master %s as %s", c.cfg.MasterAddr, c.cfg.NodeID)
+	log.Printf("registered to master %s as %s tags=%v tls=%t", c.cfg.MasterAddr, c.cfg.NodeID, c.cfg.Tags, c.cfg.TLS.EnabledForClient())
 
 	go c.runPingLoop(session)
 
@@ -108,7 +129,21 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 			return err
 		}
 		if existing, ok := c.getCommandState(shutdown.CommandID); ok {
-			return session.Send(protocol.TypeShutdownAck, existing)
+			if err := session.Send(protocol.TypeShutdownAck, existing); err != nil {
+				return err
+			}
+			switch existing.Status {
+			case protocol.ShutdownStatusAccepted:
+				return c.resumeShutdown(shutdown, session)
+			case protocol.ShutdownStatusExecuting:
+				if !c.beginShutdownExecution(shutdown.CommandID) {
+					return nil
+				}
+				go c.executeShutdown(session, shutdown)
+				return nil
+			default:
+				return nil
+			}
 		}
 
 		accepted := protocol.ShutdownAckMessage{
@@ -122,33 +157,7 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 		if err := session.Send(protocol.TypeShutdownAck, accepted); err != nil {
 			return err
 		}
-
-		if shutdown.DryRun || c.cfg.DryRun {
-			log.Printf("dry-run shutdown command received node_id=%s command_id=%s reason=%s", c.cfg.NodeID, shutdown.CommandID, shutdown.Reason)
-			executed := protocol.ShutdownAckMessage{
-				CommandID: shutdown.CommandID,
-				NodeID:    c.cfg.NodeID,
-				Status:    protocol.ShutdownStatusExecuted,
-				Message:   "dry-run shutdown simulated",
-				AckedAt:   time.Now().UTC(),
-			}
-			c.setCommandState(executed)
-			return session.Send(protocol.TypeShutdownAck, executed)
-		}
-
-		executing := protocol.ShutdownAckMessage{
-			CommandID: shutdown.CommandID,
-			NodeID:    c.cfg.NodeID,
-			Status:    protocol.ShutdownStatusExecuting,
-			Message:   "executing shutdown command",
-			AckedAt:   time.Now().UTC(),
-		}
-		c.setCommandState(executing)
-		if err := session.Send(protocol.TypeShutdownAck, executing); err != nil {
-			return err
-		}
-		go c.executeShutdown(session, shutdown)
-		return nil
+		return c.resumeShutdown(shutdown, session)
 	case protocol.TypeError:
 		var msg protocol.ErrorMessage
 		if err := decodePayload(env.Data, &msg); err != nil {
@@ -158,6 +167,38 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 	default:
 		return nil
 	}
+}
+
+func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *connectionSession) error {
+	if shutdown.DryRun || c.cfg.DryRun {
+		log.Printf("dry-run shutdown command received node_id=%s command_id=%s reason=%s", c.cfg.NodeID, shutdown.CommandID, shutdown.Reason)
+		executed := protocol.ShutdownAckMessage{
+			CommandID: shutdown.CommandID,
+			NodeID:    c.cfg.NodeID,
+			Status:    protocol.ShutdownStatusExecuted,
+			Message:   "dry-run shutdown simulated",
+			AckedAt:   time.Now().UTC(),
+		}
+		c.setCommandState(executed)
+		return session.Send(protocol.TypeShutdownAck, executed)
+	}
+
+	executing := protocol.ShutdownAckMessage{
+		CommandID: shutdown.CommandID,
+		NodeID:    c.cfg.NodeID,
+		Status:    protocol.ShutdownStatusExecuting,
+		Message:   "executing shutdown command",
+		AckedAt:   time.Now().UTC(),
+	}
+	c.setCommandState(executing)
+	if err := session.Send(protocol.TypeShutdownAck, executing); err != nil {
+		return err
+	}
+	if !c.beginShutdownExecution(shutdown.CommandID) {
+		return nil
+	}
+	go c.executeShutdown(session, shutdown)
+	return nil
 }
 
 func (c *Client) runPingLoop(session *connectionSession) {
@@ -172,6 +213,8 @@ func (c *Client) runPingLoop(session *connectionSession) {
 }
 
 func (c *Client) executeShutdown(session *connectionSession, shutdown protocol.ShutdownMessage) {
+	defer c.finishShutdownExecution(shutdown.CommandID)
+
 	update := protocol.ShutdownAckMessage{
 		CommandID: shutdown.CommandID,
 		NodeID:    c.cfg.NodeID,
@@ -201,6 +244,23 @@ func (c *Client) setCommandState(update protocol.ShutdownAckMessage) {
 	c.commandMu.Lock()
 	defer c.commandMu.Unlock()
 	c.commandStates[update.CommandID] = update
+	c.saveStateLocked()
+}
+
+func (c *Client) beginShutdownExecution(commandID string) bool {
+	c.commandMu.Lock()
+	defer c.commandMu.Unlock()
+	if _, ok := c.executingCommands[commandID]; ok {
+		return false
+	}
+	c.executingCommands[commandID] = struct{}{}
+	return true
+}
+
+func (c *Client) finishShutdownExecution(commandID string) {
+	c.commandMu.Lock()
+	defer c.commandMu.Unlock()
+	delete(c.executingCommands, commandID)
 }
 
 func readEnvelope(reader *bufio.Reader) (protocol.Envelope, error) {

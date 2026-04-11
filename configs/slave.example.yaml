@@ -1,8 +1,19 @@
 node_id: "slave-01"
 master_addr: "192.168.1.2:9000"
 token: "replace-with-strong-token"
+tags:
+  - "web"
+state_file: "data/slave-state.json"
 reconnect_interval: "5s"
 dry_run: true
+tls:
+  enabled: false
+  disabled: false
+  cert_file: ""
+  key_file: ""
+  ca_file: ""
+  server_name: ""
+  insecure_skip_verify: false
 shutdown_command:
   - "/sbin/shutdown"
   - "-h"

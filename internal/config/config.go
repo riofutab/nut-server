@@ -9,12 +9,16 @@ import (
 )
 
 type MasterConfig struct {
-	ListenAddr     string         `yaml:"listen_addr"`
-	AuthTokens     []string       `yaml:"auth_tokens"`
-	PollInterval   Duration       `yaml:"poll_interval"`
-	DryRun         bool           `yaml:"dry_run"`
-	ShutdownPolicy ShutdownPolicy `yaml:"shutdown_policy"`
-	SNMP           SNMPConfig     `yaml:"snmp"`
+	ListenAddr      string         `yaml:"listen_addr"`
+	AdminListenAddr string         `yaml:"admin_listen_addr"`
+	StateFile       string         `yaml:"state_file"`
+	AuthTokens      []string       `yaml:"auth_tokens"`
+	PollInterval    Duration       `yaml:"poll_interval"`
+	CommandTimeout  Duration       `yaml:"command_timeout"`
+	DryRun          bool           `yaml:"dry_run"`
+	TLS             TLSConfig      `yaml:"tls"`
+	ShutdownPolicy  ShutdownPolicy `yaml:"shutdown_policy"`
+	SNMP            SNMPConfig     `yaml:"snmp"`
 }
 
 type ShutdownPolicy struct {
@@ -36,12 +40,26 @@ type SNMPConfig struct {
 }
 
 type SlaveConfig struct {
-	NodeID            string   `yaml:"node_id"`
-	MasterAddr        string   `yaml:"master_addr"`
-	Token             string   `yaml:"token"`
-	ReconnectInterval Duration `yaml:"reconnect_interval"`
-	DryRun            bool     `yaml:"dry_run"`
-	ShutdownCommand   []string `yaml:"shutdown_command"`
+	NodeID            string    `yaml:"node_id"`
+	MasterAddr        string    `yaml:"master_addr"`
+	Token             string    `yaml:"token"`
+	Tags              []string  `yaml:"tags"`
+	StateFile         string    `yaml:"state_file"`
+	ReconnectInterval Duration  `yaml:"reconnect_interval"`
+	DryRun            bool      `yaml:"dry_run"`
+	TLS               TLSConfig `yaml:"tls"`
+	ShutdownCommand   []string  `yaml:"shutdown_command"`
+}
+
+type TLSConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	Disabled           bool   `yaml:"disabled"`
+	CertFile           string `yaml:"cert_file"`
+	KeyFile            string `yaml:"key_file"`
+	CAFile             string `yaml:"ca_file"`
+	ServerName         string `yaml:"server_name"`
+	RequireClientCert  bool   `yaml:"require_client_cert"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
 }
 
 type Duration struct {
@@ -61,6 +79,58 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func (c TLSConfig) EnabledForServer() bool {
+	if c.Disabled {
+		return false
+	}
+	return c.Enabled || c.CertFile != "" || c.KeyFile != "" || c.CAFile != "" || c.RequireClientCert
+}
+
+func (c TLSConfig) EnabledForClient() bool {
+	if c.Disabled {
+		return false
+	}
+	return c.Enabled || c.CertFile != "" || c.KeyFile != "" || c.CAFile != "" || c.ServerName != "" || c.InsecureSkipVerify
+}
+
+func (c TLSConfig) ValidateServer() error {
+	if c.Disabled {
+		return nil
+	}
+	if !c.EnabledForServer() {
+		return nil
+	}
+	if c.CertFile == "" {
+		return fmt.Errorf("tls.cert_file must not be empty when TLS is enabled")
+	}
+	if c.KeyFile == "" {
+		return fmt.Errorf("tls.key_file must not be empty when TLS is enabled")
+	}
+	if c.RequireClientCert && c.CAFile == "" {
+		return fmt.Errorf("tls.ca_file must not be empty when tls.require_client_cert is true")
+	}
+	return nil
+}
+
+func (c TLSConfig) ValidateClient() error {
+	if c.Disabled {
+		return nil
+	}
+	if !c.EnabledForClient() {
+		return nil
+	}
+	if c.CertFile != "" && c.KeyFile == "" {
+		return fmt.Errorf("tls.key_file must not be empty when tls.cert_file is set")
+	}
+	if c.KeyFile != "" && c.CertFile == "" {
+		return fmt.Errorf("tls.cert_file must not be empty when tls.key_file is set")
+	}
+	if c.InsecureSkipVerify && c.CAFile != "" {
+		return fmt.Errorf("tls.ca_file cannot be combined with tls.insecure_skip_verify")
+	}
+	return nil
+}
+
 func LoadMasterConfig(path string) (MasterConfig, error) {
 	var cfg MasterConfig
 	if err := loadYAML(path, &cfg); err != nil {
@@ -69,11 +139,23 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":9000"
 	}
+	if cfg.AdminListenAddr == "" {
+		cfg.AdminListenAddr = "127.0.0.1:9001"
+	}
+	if cfg.StateFile == "" {
+		cfg.StateFile = "data/master-state.json"
+	}
 	if len(cfg.AuthTokens) == 0 {
 		return MasterConfig{}, fmt.Errorf("auth_tokens must not be empty")
 	}
 	if cfg.PollInterval.Duration == 0 {
 		cfg.PollInterval.Duration = 10 * time.Second
+	}
+	if cfg.CommandTimeout.Duration == 0 {
+		cfg.CommandTimeout.Duration = 30 * time.Second
+	}
+	if err := cfg.TLS.ValidateServer(); err != nil {
+		return MasterConfig{}, err
 	}
 	if cfg.SNMP.Target == "" {
 		return MasterConfig{}, fmt.Errorf("snmp.target must not be empty")
@@ -106,6 +188,12 @@ func LoadSlaveConfig(path string) (SlaveConfig, error) {
 	}
 	if cfg.ReconnectInterval.Duration == 0 {
 		cfg.ReconnectInterval.Duration = 5 * time.Second
+	}
+	if cfg.StateFile == "" {
+		cfg.StateFile = "data/slave-state.json"
+	}
+	if err := cfg.TLS.ValidateClient(); err != nil {
+		return SlaveConfig{}, err
 	}
 	if len(cfg.ShutdownCommand) == 0 {
 		cfg.ShutdownCommand = []string{"/sbin/shutdown", "-h", "now"}

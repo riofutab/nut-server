@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nut-server/internal/protocol"
@@ -19,14 +20,17 @@ type Client struct {
 	mu       sync.Mutex
 	reader   *bufio.Reader
 	writer   *bufio.Writer
+	lastSeen atomic.Int64
 }
 
 func NewClient(conn net.Conn) *Client {
-	return &Client{
+	client := &Client{
 		Conn:   conn,
 		reader: bufio.NewReader(conn),
 		writer: bufio.NewWriter(conn),
 	}
+	client.Touch()
+	return client
 }
 
 func (c *Client) Send(messageType string, payload interface{}) error {
@@ -53,6 +57,18 @@ func (c *Client) ReadEnvelope() (protocol.Envelope, error) {
 		return protocol.Envelope{}, fmt.Errorf("decode envelope: %w", err)
 	}
 	return env, nil
+}
+
+func (c *Client) Touch() {
+	c.lastSeen.Store(time.Now().UTC().UnixNano())
+}
+
+func (c *Client) LastSeen() time.Time {
+	unixNano := c.lastSeen.Load()
+	if unixNano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, unixNano).UTC()
 }
 
 func (c *Client) Close() error {

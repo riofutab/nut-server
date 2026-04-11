@@ -1,8 +1,18 @@
 listen_addr: ":9000"
+admin_listen_addr: "127.0.0.1:9001"
+state_file: "data/master-state.json"
 auth_tokens:
   - "replace-with-strong-token"
 poll_interval: "10s"
+command_timeout: "30s"
 dry_run: true
+tls:
+  enabled: false
+  disabled: false
+  cert_file: ""
+  key_file: ""
+  ca_file: ""
+  require_client_cert: false
 shutdown_policy:
   require_on_battery: true
   min_battery_charge: 30
