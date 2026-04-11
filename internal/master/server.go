@@ -20,22 +20,24 @@ import (
 )
 
 type Server struct {
-	cfg            config.MasterConfig
-	registry       *Registry
-	commandSeq     atomic.Uint64
-	shutdownIssued atomic.Bool
-	commandMu      sync.Mutex
-	commands       map[string]*shutdownCommandState
-	activeCommand  string
-	tlsConfig      *tls.Config
+	cfg                config.MasterConfig
+	registry           *Registry
+	commandSeq         atomic.Uint64
+	shutdownIssued     atomic.Bool
+	commandMu          sync.Mutex
+	commands           map[string]*shutdownCommandState
+	activeCommand      string
+	autoShutdownLatched bool
+	tlsConfig          *tls.Config
 }
 
 type shutdownCommandState struct {
-	Message     protocol.ShutdownMessage
-	TargetNodes map[string]struct{}
-	NodeUpdates map[string]protocol.ShutdownAckMessage
-	TimeoutAt   *time.Time
-	CompletedAt *time.Time
+	Message        protocol.ShutdownMessage
+	TargetNodes    map[string]struct{}
+	NodeUpdates    map[string]protocol.ShutdownAckMessage
+	TimeoutAt      *time.Time
+	CompletedAt    *time.Time
+	ReplayDisabled bool `json:"replay_disabled,omitempty"`
 }
 
 func NewServer(cfg config.MasterConfig) *Server {
@@ -256,19 +258,23 @@ func (s *Server) evaluateUPS() error {
 	if err != nil {
 		return err
 	}
-	if ShouldShutdown(status, s.cfg.ShutdownPolicy) {
-		_, _, err := s.TriggerShutdown(protocol.ShutdownRequest{Reason: s.cfg.ShutdownPolicy.ShutdownReason})
-		if err != nil && err == errShutdownAlreadyActive {
-			return nil
-		}
-		return err
+	if !ShouldShutdown(status, s.cfg.ShutdownPolicy) {
+		return nil
 	}
-	return nil
+	_, _, err = s.triggerShutdown(protocol.ShutdownRequest{Reason: s.cfg.ShutdownPolicy.ShutdownReason}, true)
+	if err != nil && err == errShutdownAlreadyActive {
+		return nil
+	}
+	return err
 }
 
 var errShutdownAlreadyActive = fmt.Errorf("shutdown already active")
 
 func (s *Server) TriggerShutdown(request protocol.ShutdownRequest) (protocol.ShutdownMessage, protocol.CommandSummary, error) {
+	return s.triggerShutdown(request, false)
+}
+
+func (s *Server) triggerShutdown(request protocol.ShutdownRequest, auto bool) (protocol.ShutdownMessage, protocol.CommandSummary, error) {
 	reason := strings.TrimSpace(request.Reason)
 	if reason == "" {
 		reason = s.cfg.ShutdownPolicy.ShutdownReason
@@ -306,7 +312,7 @@ func (s *Server) TriggerShutdown(request protocol.ShutdownRequest) (protocol.Shu
 	timeoutAt := message.IssuedAt.Add(timeout)
 
 	s.commandMu.Lock()
-	if s.activeCommand != "" {
+	if s.activeCommand != "" || (auto && s.autoShutdownLatched) {
 		s.commandMu.Unlock()
 		return protocol.ShutdownMessage{}, protocol.CommandSummary{}, errShutdownAlreadyActive
 	}
@@ -324,6 +330,9 @@ func (s *Server) TriggerShutdown(request protocol.ShutdownRequest) (protocol.Shu
 		TimeoutAt:   &timeoutAt,
 	}
 	s.activeCommand = message.CommandID
+	if auto {
+		s.autoShutdownLatched = true
+	}
 	s.shutdownIssued.Store(true)
 	s.saveStateLocked()
 	s.commandMu.Unlock()
@@ -448,39 +457,17 @@ func (s *Server) recordShutdownUpdate(update protocol.ShutdownAckMessage) {
 	if commandComplete(command) {
 		now := time.Now().UTC()
 		command.CompletedAt = &now
-		s.shutdownIssued.Store(false)
 		if s.activeCommand == update.CommandID {
 			s.activeCommand = ""
+			s.shutdownIssued.Store(false)
 		}
 	}
 	s.saveStateLocked()
 }
 
 func (s *Server) replayPendingShutdown(client *Client) error {
-	s.commandMu.Lock()
-	commandID := s.activeCommand
-	if commandID == "" {
-		s.commandMu.Unlock()
-		return nil
-	}
-	command, ok := s.commands[commandID]
+	message, ok := s.replayableShutdownForNode(client.NodeID)
 	if !ok {
-		s.commandMu.Unlock()
-		return nil
-	}
-	if _, wasTarget := command.TargetNodes[client.NodeID]; !wasTarget {
-		s.commandMu.Unlock()
-		return nil
-	}
-	lastUpdate, hasUpdate := command.NodeUpdates[client.NodeID]
-	message := command.Message
-	timeoutAt := command.TimeoutAt
-	s.commandMu.Unlock()
-
-	if timeoutAt != nil && time.Now().UTC().After(*timeoutAt) {
-		return nil
-	}
-	if hasUpdate && isCompleteShutdownStatus(lastUpdate.Status) {
 		return nil
 	}
 	return client.Send(protocol.TypeShutdown, message)
@@ -489,7 +476,11 @@ func (s *Server) replayPendingShutdown(client *Client) error {
 func (s *Server) ResetActiveCommand() {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
+	if command, ok := s.commands[s.activeCommand]; ok && command != nil {
+		command.ReplayDisabled = true
+	}
 	s.activeCommand = ""
+	s.autoShutdownLatched = false
 	s.shutdownIssued.Store(false)
 	s.saveStateLocked()
 }
@@ -656,6 +647,32 @@ func latestNodeUpdate(nodeID string, commands map[string]*shutdownCommandState) 
 	return latest, found
 }
 
+func (s *Server) replayableShutdownForNode(nodeID string) (protocol.ShutdownMessage, bool) {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+
+	if command, ok := s.commands[s.activeCommand]; ok && shouldReplayShutdownForNode(command, nodeID) {
+		return command.Message, true
+	}
+
+	var (
+		selectedMessage protocol.ShutdownMessage
+		selectedTime    time.Time
+		found           bool
+	)
+	for commandID, command := range s.commands {
+		if commandID == s.activeCommand || !shouldReplayShutdownForNode(command, nodeID) {
+			continue
+		}
+		if !found || command.Message.IssuedAt.After(selectedTime) {
+			selectedMessage = command.Message
+			selectedTime = command.Message.IssuedAt
+			found = true
+		}
+	}
+	return selectedMessage, found
+}
+
 func commandComplete(command *shutdownCommandState) bool {
 	for nodeID := range command.TargetNodes {
 		update, ok := command.NodeUpdates[nodeID]
@@ -664,6 +681,22 @@ func commandComplete(command *shutdownCommandState) bool {
 		}
 	}
 	return len(command.TargetNodes) > 0
+}
+
+func shouldReplayShutdownForNode(command *shutdownCommandState, nodeID string) bool {
+	if command == nil {
+		return false
+	}
+	if command.ReplayDisabled {
+		return false
+	}
+	if _, wasTarget := command.TargetNodes[nodeID]; !wasTarget {
+		return false
+	}
+	if update, ok := command.NodeUpdates[nodeID]; ok && isFinalShutdownStatus(update.Status) {
+		return false
+	}
+	return true
 }
 
 func isCompleteShutdownStatus(status string) bool {

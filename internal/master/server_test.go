@@ -314,10 +314,212 @@ func TestRecordShutdownUpdateReplacesTimeoutWithExecuted(t *testing.T) {
 	}
 }
 
+func TestRecordShutdownUpdateDoesNotClearActiveCommandForOlderCompletion(t *testing.T) {
+	server := NewServer(config.MasterConfig{})
+	issuedAt := time.Now().UTC().Add(-10 * time.Second)
+	timeoutAt := issuedAt.Add(1 * time.Second)
+	completedAt := issuedAt.Add(2 * time.Second)
+	server.commands["shutdown-old"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-old",
+			Reason:    "manual",
+			IssuedAt:  issuedAt,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{
+			"node-1": {},
+		},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{
+			"node-1": {
+				CommandID: "shutdown-old",
+				NodeID:    "node-1",
+				Status:    protocol.ShutdownStatusTimeout,
+				Message:   "command timed out waiting for terminal status",
+				AckedAt:   completedAt,
+			},
+		},
+		TimeoutAt:   &timeoutAt,
+		CompletedAt: &completedAt,
+	}
+	server.commands["shutdown-new"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-new",
+			Reason:    "manual",
+			IssuedAt:  time.Now().UTC(),
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-2"}},
+		},
+		TargetNodes: map[string]struct{}{
+			"node-2": {},
+		},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{
+			"node-2": {
+				CommandID: "shutdown-new",
+				NodeID:    "node-2",
+				Status:    protocol.ShutdownStatusAccepted,
+				AckedAt:   time.Now().UTC(),
+			},
+		},
+	}
+	server.activeCommand = "shutdown-new"
+	server.shutdownIssued.Store(true)
+
+	server.recordShutdownUpdate(protocol.ShutdownAckMessage{
+		CommandID: "shutdown-old",
+		NodeID:    "node-1",
+		Status:    protocol.ShutdownStatusExecuted,
+		Message:   "shutdown completed after reconnect",
+		AckedAt:   completedAt.Add(3 * time.Second),
+	})
+
+	if server.activeCommand != "shutdown-new" {
+		t.Fatalf("expected active command to remain shutdown-new, got %q", server.activeCommand)
+	}
+	if !server.shutdownIssued.Load() {
+		t.Fatalf("expected shutdownIssued to remain true while newer command is active")
+	}
+}
+
+func TestAutoShutdownLatchPreventsRepeatedUPSTriggersUntilReset(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		DryRun:         true,
+		CommandTimeout: config.Duration{Duration: 30 * time.Second},
+		ShutdownPolicy: config.ShutdownPolicy{ShutdownReason: "ups low"},
+	})
+	server.shutdownIssued.Store(true)
+	server.activeCommand = "shutdown-1"
+	server.autoShutdownLatched = true
+	server.commands["shutdown-1"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-1",
+			Reason:    "ups low",
+			IssuedAt:  time.Now().UTC(),
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{
+			"node-1": {
+				CommandID: "shutdown-1",
+				NodeID:    "node-1",
+				Status:    protocol.ShutdownStatusAccepted,
+				AckedAt:   time.Now().UTC(),
+			},
+		},
+	}
+
+	server.recordShutdownUpdate(protocol.ShutdownAckMessage{
+		CommandID: "shutdown-1",
+		NodeID:    "node-1",
+		Status:    protocol.ShutdownStatusExecuted,
+		AckedAt:   time.Now().UTC(),
+	})
+
+	server.commandMu.Lock()
+	latched := server.autoShutdownLatched
+	server.commandMu.Unlock()
+	if !latched {
+		t.Fatalf("expected auto shutdown latch to remain set after completion")
+	}
+}
+
+func TestReplayPendingShutdownAllowsTimedOutNodeWithoutFinalState(t *testing.T) {
+	server := NewServer(config.MasterConfig{})
+	issuedAt := time.Now().UTC().Add(-5 * time.Second)
+	timeoutAt := issuedAt.Add(1 * time.Second)
+	server.commands["shutdown-timeout"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-timeout",
+			Reason:    "ups low",
+			IssuedAt:  issuedAt,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{
+			"node-1": {
+				CommandID: "shutdown-timeout",
+				NodeID:    "node-1",
+				Status:    protocol.ShutdownStatusTimeout,
+				AckedAt:   issuedAt.Add(2 * time.Second),
+			},
+		},
+		TimeoutAt: &timeoutAt,
+	}
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+
+	client := NewClient(conn)
+	client.NodeID = "node-1"
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.replayPendingShutdown(client)
+	}()
+
+	env := readEnvelopeFromConn(t, peer)
+	if err := <-errCh; err != nil {
+		t.Fatalf("replay pending shutdown: %v", err)
+	}
+	if env.Type != protocol.TypeShutdown {
+		t.Fatalf("expected shutdown replay, got %s", env.Type)
+	}
+}
+
+func TestResetActiveCommandStopsReplayOfClearedShutdown(t *testing.T) {
+	server := NewServer(config.MasterConfig{})
+	issuedAt := time.Now().UTC().Add(-5 * time.Second)
+	server.activeCommand = "shutdown-reset"
+	server.shutdownIssued.Store(true)
+	server.commands["shutdown-reset"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-reset",
+			Reason:    "manual",
+			IssuedAt:  issuedAt,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{
+			"node-1": {
+				CommandID: "shutdown-reset",
+				NodeID:    "node-1",
+				Status:    protocol.ShutdownStatusTimeout,
+				AckedAt:   issuedAt.Add(2 * time.Second),
+			},
+		},
+	}
+
+	server.ResetActiveCommand()
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+
+	client := NewClient(conn)
+	client.NodeID = "node-1"
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.replayPendingShutdown(client)
+	}()
+
+	if err := peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buffer := make([]byte, 1)
+	if _, err := peer.Read(buffer); err == nil {
+		t.Fatalf("expected no replay after reset clears the command")
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout when no replay is sent, got %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("replay pending shutdown after reset: %v", err)
+	}
+}
+
 func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
 	server := NewServer(config.MasterConfig{})
 	server.shutdownIssued.Store(true)
 	server.activeCommand = "shutdown-1"
+	server.autoShutdownLatched = true
 
 	server.ResetActiveCommand()
 
@@ -326,6 +528,9 @@ func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
 	}
 	if server.activeCommand != "" {
 		t.Fatalf("expected active command cleared")
+	}
+	if server.autoShutdownLatched {
+		t.Fatalf("expected auto shutdown latch cleared")
 	}
 }
 

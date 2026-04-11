@@ -9,9 +9,10 @@ import (
 )
 
 type persistedState struct {
-	CommandSeq    uint64                           `json:"command_seq"`
-	ActiveCommand string                           `json:"active_command,omitempty"`
-	Commands      map[string]*shutdownCommandState `json:"commands,omitempty"`
+	CommandSeq          uint64                           `json:"command_seq"`
+	ActiveCommand       string                           `json:"active_command,omitempty"`
+	AutoShutdownLatched bool                             `json:"auto_shutdown_latched,omitempty"`
+	Commands            map[string]*shutdownCommandState `json:"commands,omitempty"`
 }
 
 func (s *Server) loadState() {
@@ -36,6 +37,7 @@ func (s *Server) loadState() {
 	}
 	s.commands = state.Commands
 	s.activeCommand = state.ActiveCommand
+	s.autoShutdownLatched = state.AutoShutdownLatched
 	s.commandSeq.Store(state.CommandSeq)
 	s.shutdownIssued.Store(state.ActiveCommand != "")
 }
@@ -45,9 +47,10 @@ func (s *Server) saveStateLocked() {
 		return
 	}
 	state := persistedState{
-		CommandSeq:    s.commandSeq.Load(),
-		ActiveCommand: s.activeCommand,
-		Commands:      s.commands,
+		CommandSeq:          s.commandSeq.Load(),
+		ActiveCommand:       s.activeCommand,
+		AutoShutdownLatched: s.autoShutdownLatched,
+		Commands:            s.commands,
 	}
 	content, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

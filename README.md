@@ -349,3 +349,34 @@ make package
 make run-master
 make run-slave
 ```
+
+## Release Packages
+
+Published releases now include these archive families for both `amd64` and `arm64`:
+
+- `nut-server_<version>_linux_<arch>.tar.gz`
+- `nut-master_<version>_linux_<arch>.tar.gz`
+- `nut-slave_<version>_linux_<arch>.tar.gz`
+- `nut-server-upgrade_<version>_linux_<arch>.tar.gz`
+
+Quick install wrappers default to plain TCP for internal networks unless you pass normal `--tls-*` options:
+
+```bash
+sudo ./scripts/quick-install-master.sh --token your-token --snmp-target 10.0.0.31
+sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+```
+
+Online install can download a published release package and hand off to the role-specific install or upgrade script:
+
+```bash
+sudo ./scripts/install-online.sh --role master --version v0.1.2 -- --token your-token --snmp-target 10.0.0.31
+sudo ./scripts/install-online.sh --role slave --version latest -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+sudo ./scripts/install-online.sh --role upgrade-master --version latest
+```
+
+Upgrade scripts only replace binaries and systemd unit files. Existing config and state files stay in place:
+
+```bash
+sudo ./scripts/upgrade-master.sh
+sudo ./scripts/upgrade-slave.sh
+```

@@ -22,9 +22,19 @@ build_target() {
   cp "$ROOT_DIR/configs/slave.example.yaml" "$out_dir/configs/slave.example.yaml"
   cp "$ROOT_DIR/packaging/systemd/nut-master.service" "$out_dir/packaging/systemd/nut-master.service"
   cp "$ROOT_DIR/packaging/systemd/nut-slave.service" "$out_dir/packaging/systemd/nut-slave.service"
-  cp "$ROOT_DIR/scripts/install-master.sh" "$out_dir/scripts/install-master.sh"
-  cp "$ROOT_DIR/scripts/install-slave.sh" "$out_dir/scripts/install-slave.sh"
-  chmod +x "$out_dir/scripts/install-master.sh" "$out_dir/scripts/install-slave.sh"
+  for script_name in \
+    install-master.sh \
+    install-slave.sh \
+    quick-install-master.sh \
+    quick-install-slave.sh \
+    install-online.sh \
+    upgrade-common.sh \
+    upgrade-master.sh \
+    upgrade-slave.sh
+  do
+    cp "$ROOT_DIR/scripts/$script_name" "$out_dir/scripts/$script_name"
+  done
+  chmod +x "$out_dir/scripts/"*.sh
 }
 
 mkdir -p "$DIST_DIR"

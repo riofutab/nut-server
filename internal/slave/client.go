@@ -21,8 +21,12 @@ type Client struct {
 	shutdown          ShutdownExecutor
 	commandMu         sync.Mutex
 	commandStates     map[string]protocol.ShutdownAckMessage
-	executingCommands map[string]struct{}
+	executions        map[string]*shutdownExecution
 	tlsConfig         *tls.Config
+}
+
+type shutdownExecution struct {
+	session *connectionSession
 }
 
 type connectionSession struct {
@@ -34,11 +38,11 @@ type connectionSession struct {
 func NewClient(cfg config.SlaveConfig) *Client {
 	hostname, _ := os.Hostname()
 	client := &Client{
-		cfg:               cfg,
-		hostname:          hostname,
-		shutdown:          CommandShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
-		commandStates:     make(map[string]protocol.ShutdownAckMessage),
-		executingCommands: make(map[string]struct{}),
+		cfg:           cfg,
+		hostname:      hostname,
+		shutdown:      CommandShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
+		commandStates: make(map[string]protocol.ShutdownAckMessage),
+		executions:    make(map[string]*shutdownExecution),
 	}
 	client.loadState()
 	return client
@@ -129,6 +133,10 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 			return err
 		}
 		if existing, ok := c.getCommandState(shutdown.CommandID); ok {
+			shouldStartExecution := false
+			if existing.Status == protocol.ShutdownStatusExecuting {
+				shouldStartExecution = c.beginOrRebindShutdownExecution(shutdown.CommandID, session)
+			}
 			if err := session.Send(protocol.TypeShutdownAck, existing); err != nil {
 				return err
 			}
@@ -136,10 +144,10 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 			case protocol.ShutdownStatusAccepted:
 				return c.resumeShutdown(shutdown, session)
 			case protocol.ShutdownStatusExecuting:
-				if !c.beginShutdownExecution(shutdown.CommandID) {
+				if !shouldStartExecution {
 					return nil
 				}
-				go c.executeShutdown(session, shutdown)
+				go c.executeShutdown(shutdown.CommandID, shutdown)
 				return nil
 			default:
 				return nil
@@ -194,10 +202,10 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 	if err := session.Send(protocol.TypeShutdownAck, executing); err != nil {
 		return err
 	}
-	if !c.beginShutdownExecution(shutdown.CommandID) {
+	if !c.beginOrRebindShutdownExecution(shutdown.CommandID, session) {
 		return nil
 	}
-	go c.executeShutdown(session, shutdown)
+	go c.executeShutdown(shutdown.CommandID, shutdown)
 	return nil
 }
 
@@ -212,8 +220,8 @@ func (c *Client) runPingLoop(session *connectionSession) {
 	}
 }
 
-func (c *Client) executeShutdown(session *connectionSession, shutdown protocol.ShutdownMessage) {
-	defer c.finishShutdownExecution(shutdown.CommandID)
+func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMessage) {
+	defer c.finishShutdownExecution(commandID)
 
 	update := protocol.ShutdownAckMessage{
 		CommandID: shutdown.CommandID,
@@ -228,6 +236,10 @@ func (c *Client) executeShutdown(session *connectionSession, shutdown protocol.S
 		update.AckedAt = time.Now().UTC()
 	}
 	c.setCommandState(update)
+	session := c.shutdownExecutionSession(commandID)
+	if session == nil {
+		return
+	}
 	if err := session.Send(protocol.TypeShutdownAck, update); err != nil {
 		log.Printf("report shutdown status failed node_id=%s command_id=%s status=%s: %v", c.cfg.NodeID, shutdown.CommandID, update.Status, err)
 	}
@@ -247,20 +259,30 @@ func (c *Client) setCommandState(update protocol.ShutdownAckMessage) {
 	c.saveStateLocked()
 }
 
-func (c *Client) beginShutdownExecution(commandID string) bool {
+func (c *Client) beginOrRebindShutdownExecution(commandID string, session *connectionSession) bool {
 	c.commandMu.Lock()
 	defer c.commandMu.Unlock()
-	if _, ok := c.executingCommands[commandID]; ok {
+	if execution, ok := c.executions[commandID]; ok {
+		execution.session = session
 		return false
 	}
-	c.executingCommands[commandID] = struct{}{}
+	c.executions[commandID] = &shutdownExecution{session: session}
 	return true
 }
 
 func (c *Client) finishShutdownExecution(commandID string) {
 	c.commandMu.Lock()
 	defer c.commandMu.Unlock()
-	delete(c.executingCommands, commandID)
+	delete(c.executions, commandID)
+}
+
+func (c *Client) shutdownExecutionSession(commandID string) *connectionSession {
+	c.commandMu.Lock()
+	defer c.commandMu.Unlock()
+	if execution := c.executions[commandID]; execution != nil {
+		return execution.session
+	}
+	return nil
 }
 
 func readEnvelope(reader *bufio.Reader) (protocol.Envelope, error) {

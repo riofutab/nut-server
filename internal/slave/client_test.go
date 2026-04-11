@@ -218,7 +218,7 @@ func TestHandleShutdownDoesNotDuplicateActiveExecutionOnReconnect(t *testing.T) 
 		AckedAt:   time.Now().UTC().Add(-2 * time.Second),
 	})
 	client.commandMu.Lock()
-	client.executingCommands["shutdown-running"] = struct{}{}
+	client.executions["shutdown-running"] = &shutdownExecution{}
 	client.commandMu.Unlock()
 
 	conn, peer := net.Pipe()
@@ -261,6 +261,70 @@ func TestHandleShutdownDoesNotDuplicateActiveExecutionOnReconnect(t *testing.T) 
 	}
 }
 
+func TestHandleShutdownRebindsExecutingCommandToReplacementSession(t *testing.T) {
+	client := NewClient(config.SlaveConfig{NodeID: "node-1"})
+	executor := &blockingShutdownExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	client.shutdown = executor
+
+	firstConn, firstPeer := net.Pipe()
+	defer firstConn.Close()
+	defer firstPeer.Close()
+	firstReader := bufio.NewReader(firstPeer)
+	firstSession := newConnectionSession(firstConn)
+
+	shutdown := protocol.Envelope{
+		Type: protocol.TypeShutdown,
+		Data: protocol.ShutdownMessage{
+			CommandID: "shutdown-rebind",
+			Reason:    "battery low",
+			IssuedAt:  time.Now().UTC(),
+		},
+	}
+
+	firstErrCh := make(chan error, 1)
+	go func() {
+		firstErrCh <- client.handleEnvelope(shutdown, firstSession)
+	}()
+
+	if first := readShutdownUpdate(t, firstPeer, firstReader); first.Status != protocol.ShutdownStatusAccepted {
+		t.Fatalf("expected first status accepted, got %s", first.Status)
+	}
+	if second := readShutdownUpdate(t, firstPeer, firstReader); second.Status != protocol.ShutdownStatusExecuting {
+		t.Fatalf("expected second status executing, got %s", second.Status)
+	}
+	<-executor.started
+
+	secondConn, secondPeer := net.Pipe()
+	defer secondConn.Close()
+	defer secondPeer.Close()
+	secondReader := bufio.NewReader(secondPeer)
+	secondSession := newConnectionSession(secondConn)
+
+	secondErrCh := make(chan error, 1)
+	go func() {
+		secondErrCh <- client.handleEnvelope(shutdown, secondSession)
+	}()
+
+	if replay := readShutdownUpdate(t, secondPeer, secondReader); replay.Status != protocol.ShutdownStatusExecuting {
+		t.Fatalf("expected replayed executing status, got %s", replay.Status)
+	}
+
+	close(executor.release)
+
+	if final := readShutdownUpdate(t, secondPeer, secondReader); final.Status != protocol.ShutdownStatusExecuted {
+		t.Fatalf("expected final executed status on replacement session, got %s", final.Status)
+	}
+	if err := <-firstErrCh; err != nil {
+		t.Fatalf("initial handle shutdown: %v", err)
+	}
+	if err := <-secondErrCh; err != nil {
+		t.Fatalf("replayed handle shutdown: %v", err)
+	}
+}
+
 type fakeShutdownExecutor struct {
 	mu    sync.Mutex
 	calls int
@@ -278,6 +342,21 @@ func (f *fakeShutdownExecutor) Calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+type blockingShutdownExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+	once    sync.Once
+}
+
+func (b *blockingShutdownExecutor) Execute(_ *log.Logger) error {
+	b.once.Do(func() {
+		close(b.started)
+	})
+	<-b.release
+	return b.err
 }
 
 var errTestShutdownFailed = testError("shutdown failed")
