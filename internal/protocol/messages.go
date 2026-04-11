@@ -102,8 +102,19 @@ type NodeStatus struct {
 	LastShutdown *ShutdownAckMessage `json:"last_shutdown,omitempty"`
 }
 
+type UPSStatusView struct {
+	Target         string     `json:"target"`
+	OnBattery      *bool      `json:"on_battery,omitempty"`
+	BatteryCharge  *int       `json:"battery_charge,omitempty"`
+	RuntimeMinutes *int       `json:"runtime_minutes,omitempty"`
+	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	LastErrorAt    *time.Time `json:"last_error_at,omitempty"`
+}
+
 type StatusResponse struct {
 	ShutdownIssued bool            `json:"shutdown_issued"`
 	ActiveCommand  *CommandSummary `json:"active_command,omitempty"`
+	UPS            *UPSStatusView  `json:"ups,omitempty"`
 	Nodes          []NodeStatus    `json:"nodes"`
 }

@@ -23,11 +23,24 @@ Enable TLS only when you pass the normal `--tls-*` options to `install-master.sh
 Online install from a published release:
 
 ```bash
-sudo ./scripts/install-online.sh --role master --version v0.1.2 -- --token your-token --snmp-target 10.0.0.31
+sudo ./scripts/install-online.sh --role master --version v0.1.3 -- --token your-token --snmp-target 10.0.0.31
 ```
 
 Upgrade an installed master without replacing config or state files:
 
 ```bash
 sudo ./scripts/upgrade-master.sh
+```
+
+To print successful UPS polls into the service log, set `log_ups_status: true` in `/etc/nut-server/master.yaml`, then restart the service:
+
+```bash
+sudo systemctl restart nut-master
+sudo journalctl -u nut-master -f
+```
+
+The admin status endpoint also returns the latest UPS view:
+
+```bash
+curl http://127.0.0.1:9001/status
 ```

@@ -79,6 +79,43 @@ tls:
 	}
 }
 
+func TestLoadMasterConfigDefaultsUPSLoggingSwitchOff(t *testing.T) {
+	configPath := writeConfigFile(t, `
+listen_addr: ":9000"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+`)
+
+	cfg, err := LoadMasterConfig(configPath)
+	if err != nil {
+		t.Fatalf("load master config: %v", err)
+	}
+	if cfg.LogUPSStatus {
+		t.Fatalf("expected log_ups_status to default to false")
+	}
+}
+
+func TestLoadMasterConfigParsesUPSLoggingSwitch(t *testing.T) {
+	configPath := writeConfigFile(t, `
+listen_addr: ":9000"
+auth_tokens:
+  - "secret-token"
+log_ups_status: true
+snmp:
+  target: "127.0.0.1"
+`)
+
+	cfg, err := LoadMasterConfig(configPath)
+	if err != nil {
+		t.Fatalf("load master config: %v", err)
+	}
+	if !cfg.LogUPSStatus {
+		t.Fatalf("expected log_ups_status to be true")
+	}
+}
+
 func TestLoadSlaveConfigDisabledTLSIgnoresCertificateFields(t *testing.T) {
 	configPath := writeConfigFile(t, `
 node_id: "slave-01"

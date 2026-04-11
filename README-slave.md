@@ -23,7 +23,7 @@ Enable TLS only when you pass the normal `--tls-*` options to `install-slave.sh`
 Online install from a published release:
 
 ```bash
-sudo ./scripts/install-online.sh --role slave --version v0.1.2 -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+sudo ./scripts/install-online.sh --role slave --version v0.1.3 -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
 ```
 
 Upgrade an installed slave without replacing config or state files:

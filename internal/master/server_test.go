@@ -2,8 +2,12 @@ package master
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
+	"log"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -534,6 +538,83 @@ func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
 	}
 }
 
+func TestStatusIncludesLatestUPSState(t *testing.T) {
+	server := NewServer(config.MasterConfig{SNMP: config.SNMPConfig{Target: "10.0.0.31"}})
+	successAt := time.Now().UTC().Add(-10 * time.Second)
+	errorAt := successAt.Add(5 * time.Second)
+
+	server.recordUPSSuccess(UPSStatus{
+		OnBattery:      true,
+		BatteryCharge:  24,
+		RuntimeMinutes: 11,
+	}, successAt)
+	server.recordUPSError(errors.New("snmp timeout"), errorAt)
+
+	status := server.Status()
+	if status.UPS == nil {
+		t.Fatalf("expected UPS status to be present")
+	}
+	if status.UPS.Target != "10.0.0.31" {
+		t.Fatalf("expected target 10.0.0.31, got %q", status.UPS.Target)
+	}
+	if status.UPS.OnBattery == nil || !*status.UPS.OnBattery {
+		t.Fatalf("expected on_battery to remain true")
+	}
+	if status.UPS.BatteryCharge == nil || *status.UPS.BatteryCharge != 24 {
+		t.Fatalf("expected battery_charge 24, got %v", status.UPS.BatteryCharge)
+	}
+	if status.UPS.RuntimeMinutes == nil || *status.UPS.RuntimeMinutes != 11 {
+		t.Fatalf("expected runtime_minutes 11, got %v", status.UPS.RuntimeMinutes)
+	}
+	if status.UPS.LastSuccessAt == nil || !status.UPS.LastSuccessAt.Equal(successAt) {
+		t.Fatalf("expected last_success_at %v, got %v", successAt, status.UPS.LastSuccessAt)
+	}
+	if status.UPS.LastError != "snmp timeout" {
+		t.Fatalf("expected last_error to be recorded, got %q", status.UPS.LastError)
+	}
+	if status.UPS.LastErrorAt == nil || !status.UPS.LastErrorAt.Equal(errorAt) {
+		t.Fatalf("expected last_error_at %v, got %v", errorAt, status.UPS.LastErrorAt)
+	}
+}
+
+func TestRecordUPSSuccessLogsWhenEnabled(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		LogUPSStatus: true,
+		SNMP:         config.SNMPConfig{Target: "10.0.0.31"},
+	})
+	logOutput, restoreLog := captureStandardLog(t)
+	defer restoreLog()
+
+	server.recordUPSSuccess(UPSStatus{
+		OnBattery:      false,
+		BatteryCharge:  95,
+		RuntimeMinutes: 42,
+	}, time.Now().UTC())
+
+	output := logOutput.String()
+	if !strings.Contains(output, "ups status target=10.0.0.31 on_battery=false charge=95 runtime_minutes=42") {
+		t.Fatalf("expected UPS success log, got %q", output)
+	}
+}
+
+func TestRecordUPSSuccessSkipsLogWhenDisabled(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		SNMP: config.SNMPConfig{Target: "10.0.0.31"},
+	})
+	logOutput, restoreLog := captureStandardLog(t)
+	defer restoreLog()
+
+	server.recordUPSSuccess(UPSStatus{
+		OnBattery:      false,
+		BatteryCharge:  95,
+		RuntimeMinutes: 42,
+	}, time.Now().UTC())
+
+	if strings.Contains(logOutput.String(), "ups status") {
+		t.Fatalf("expected no UPS success log when switch is disabled, got %q", logOutput.String())
+	}
+}
+
 func readEnvelope(conn net.Conn) (protocol.Envelope, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return protocol.Envelope{}, err
@@ -566,5 +647,21 @@ func decodePayloadForTest(t *testing.T, data interface{}, dst interface{}) {
 	}
 	if err := json.Unmarshal(payload, dst); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
+	}
+}
+
+func captureStandardLog(t *testing.T) (*bytes.Buffer, func()) {
+	t.Helper()
+	var output bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	previousPrefix := log.Prefix()
+	log.SetOutput(&output)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	return &output, func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
 	}
 }

@@ -20,15 +20,17 @@ import (
 )
 
 type Server struct {
-	cfg                config.MasterConfig
-	registry           *Registry
-	commandSeq         atomic.Uint64
-	shutdownIssued     atomic.Bool
-	commandMu          sync.Mutex
-	commands           map[string]*shutdownCommandState
-	activeCommand      string
+	cfg                 config.MasterConfig
+	registry            *Registry
+	commandSeq          atomic.Uint64
+	shutdownIssued      atomic.Bool
+	commandMu           sync.Mutex
+	commands            map[string]*shutdownCommandState
+	activeCommand       string
 	autoShutdownLatched bool
-	tlsConfig          *tls.Config
+	upsMu               sync.RWMutex
+	upsStatus           *protocol.UPSStatusView
+	tlsConfig           *tls.Config
 }
 
 type shutdownCommandState struct {
@@ -45,6 +47,9 @@ func NewServer(cfg config.MasterConfig) *Server {
 		cfg:      cfg,
 		registry: NewRegistry(),
 		commands: make(map[string]*shutdownCommandState),
+	}
+	if cfg.SNMP.Target != "" {
+		server.upsStatus = &protocol.UPSStatusView{Target: cfg.SNMP.Target}
 	}
 	server.loadState()
 	return server
@@ -254,10 +259,13 @@ func (s *Server) runPollingLoop() {
 }
 
 func (s *Server) evaluateUPS() error {
+	polledAt := time.Now().UTC()
 	status, err := ReadUPSStatus(s.cfg.SNMP)
 	if err != nil {
+		s.recordUPSError(err, polledAt)
 		return err
 	}
+	s.recordUPSSuccess(status, polledAt)
 	if !ShouldShutdown(status, s.cfg.ShutdownPolicy) {
 		return nil
 	}
@@ -512,6 +520,7 @@ func (s *Server) Status() protocol.StatusResponse {
 		summary := summarizeCommand(commandCopy[activeCommandID])
 		activeSummary = &summary
 	}
+	upsStatus := s.currentUPSStatus()
 
 	clients := s.registry.List()
 	clientMap := make(map[string]*Client, len(clients))
@@ -557,6 +566,7 @@ func (s *Server) Status() protocol.StatusResponse {
 	return protocol.StatusResponse{
 		ShutdownIssued: s.shutdownIssued.Load(),
 		ActiveCommand:  activeSummary,
+		UPS:            upsStatus,
 		Nodes:          nodes,
 	}
 }
@@ -725,6 +735,86 @@ func shouldReplaceShutdownUpdate(existing, next protocol.ShutdownAckMessage) boo
 		return isFinalShutdownStatus(next.Status)
 	}
 	return true
+}
+
+func (s *Server) recordUPSSuccess(status UPSStatus, polledAt time.Time) {
+	s.upsMu.Lock()
+	defer s.upsMu.Unlock()
+
+	onBattery := status.OnBattery
+	batteryCharge := status.BatteryCharge
+	runtimeMinutes := status.RuntimeMinutes
+
+	if s.upsStatus == nil {
+		s.upsStatus = &protocol.UPSStatusView{}
+	}
+	s.upsStatus.Target = s.cfg.SNMP.Target
+	s.upsStatus.OnBattery = &onBattery
+	s.upsStatus.BatteryCharge = &batteryCharge
+	s.upsStatus.RuntimeMinutes = &runtimeMinutes
+	s.upsStatus.LastSuccessAt = &polledAt
+	s.upsStatus.LastError = ""
+	s.upsStatus.LastErrorAt = nil
+
+	if s.cfg.LogUPSStatus {
+		log.Printf(
+			"ups status target=%s on_battery=%t charge=%d runtime_minutes=%d",
+			s.cfg.SNMP.Target,
+			status.OnBattery,
+			status.BatteryCharge,
+			status.RuntimeMinutes,
+		)
+	}
+}
+
+func (s *Server) recordUPSError(err error, polledAt time.Time) {
+	s.upsMu.Lock()
+	defer s.upsMu.Unlock()
+
+	if s.upsStatus == nil {
+		s.upsStatus = &protocol.UPSStatusView{}
+	}
+	s.upsStatus.Target = s.cfg.SNMP.Target
+	s.upsStatus.LastError = err.Error()
+	s.upsStatus.LastErrorAt = &polledAt
+}
+
+func (s *Server) currentUPSStatus() *protocol.UPSStatusView {
+	s.upsMu.RLock()
+	defer s.upsMu.RUnlock()
+
+	if s.upsStatus == nil {
+		if s.cfg.SNMP.Target == "" {
+			return nil
+		}
+		return &protocol.UPSStatusView{Target: s.cfg.SNMP.Target}
+	}
+
+	view := &protocol.UPSStatusView{
+		Target:    s.upsStatus.Target,
+		LastError: s.upsStatus.LastError,
+	}
+	if s.upsStatus.OnBattery != nil {
+		onBattery := *s.upsStatus.OnBattery
+		view.OnBattery = &onBattery
+	}
+	if s.upsStatus.BatteryCharge != nil {
+		batteryCharge := *s.upsStatus.BatteryCharge
+		view.BatteryCharge = &batteryCharge
+	}
+	if s.upsStatus.RuntimeMinutes != nil {
+		runtimeMinutes := *s.upsStatus.RuntimeMinutes
+		view.RuntimeMinutes = &runtimeMinutes
+	}
+	if s.upsStatus.LastSuccessAt != nil {
+		lastSuccessAt := *s.upsStatus.LastSuccessAt
+		view.LastSuccessAt = &lastSuccessAt
+	}
+	if s.upsStatus.LastErrorAt != nil {
+		lastErrorAt := *s.upsStatus.LastErrorAt
+		view.LastErrorAt = &lastErrorAt
+	}
+	return view
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {

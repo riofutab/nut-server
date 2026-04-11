@@ -369,7 +369,7 @@ sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10
 Online install can download a published release package and hand off to the role-specific install or upgrade script:
 
 ```bash
-sudo ./scripts/install-online.sh --role master --version v0.1.2 -- --token your-token --snmp-target 10.0.0.31
+sudo ./scripts/install-online.sh --role master --version v0.1.3 -- --token your-token --snmp-target 10.0.0.31
 sudo ./scripts/install-online.sh --role slave --version latest -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
 sudo ./scripts/install-online.sh --role upgrade-master --version latest
 ```
@@ -379,4 +379,25 @@ Upgrade scripts only replace binaries and systemd unit files. Existing config an
 ```bash
 sudo ./scripts/upgrade-master.sh
 sudo ./scripts/upgrade-slave.sh
+```
+
+## UPS Poll Visibility
+
+To print successful UPS polls in the master service log, set this in `/etc/nut-server/master.yaml`:
+
+```yaml
+log_ups_status: true
+```
+
+Then restart the master and watch the journal:
+
+```bash
+sudo systemctl restart nut-master
+sudo journalctl -u nut-master -f
+```
+
+The master admin endpoint also returns the latest UPS status snapshot, including the last successful values and the most recent polling error:
+
+```bash
+curl http://127.0.0.1:9001/status
 ```

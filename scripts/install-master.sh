@@ -179,6 +179,7 @@ auth_tokens:
 poll_interval: "10s"
 command_timeout: "30s"
 dry_run: true
+log_ups_status: false
 tls:
   enabled: $TLS_ENABLED
   disabled: $TLS_DISABLED

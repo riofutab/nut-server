@@ -16,6 +16,7 @@ type MasterConfig struct {
 	PollInterval    Duration       `yaml:"poll_interval"`
 	CommandTimeout  Duration       `yaml:"command_timeout"`
 	DryRun          bool           `yaml:"dry_run"`
+	LogUPSStatus    bool           `yaml:"log_ups_status"`
 	TLS             TLSConfig      `yaml:"tls"`
 	ShutdownPolicy  ShutdownPolicy `yaml:"shutdown_policy"`
 	SNMP            SNMPConfig     `yaml:"snmp"`
