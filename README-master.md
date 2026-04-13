@@ -23,7 +23,7 @@ Enable TLS only when you pass the normal `--tls-*` options to `install-master.sh
 Online install from a published release:
 
 ```bash
-sudo ./scripts/install-online.sh --role master --version v0.1.3 -- --token your-token --snmp-target 10.0.0.31
+sudo ./scripts/install-online.sh --role master --version v0.1.4 -- --token your-token --snmp-target 10.0.0.31
 ```
 
 Upgrade an installed master without replacing config or state files:
@@ -31,6 +31,17 @@ Upgrade an installed master without replacing config or state files:
 ```bash
 sudo ./scripts/upgrade-master.sh
 ```
+
+To let the master shut down its own host after remote nodes have had time to stop, enable `local_shutdown` in `/etc/nut-server/master.yaml`:
+
+```yaml
+local_shutdown:
+  enabled: true
+  max_wait: "15m"
+  emergency_runtime_minutes: 15
+```
+
+With this enabled, the master waits for remote nodes first, then shuts down its own machine when the remote nodes finish, the wait expires, or the UPS runtime drops below the emergency threshold. A local slave is not required.
 
 To print successful UPS polls into the service log, set `log_ups_status: true` in `/etc/nut-server/master.yaml`, then restart the service:
 

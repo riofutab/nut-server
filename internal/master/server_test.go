@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -250,11 +251,11 @@ func TestMarkTimedOutCommandsMarksOutstandingNodes(t *testing.T) {
 	if !summary.Complete {
 		t.Fatalf("expected command to be complete after timeout")
 	}
-	if server.shutdownIssued.Load() {
-		t.Fatalf("expected shutdownIssued false after timeout completion")
+	if !server.shutdownIssued.Load() {
+		t.Fatalf("expected shutdownIssued to remain true while timed-out nodes can still repair state")
 	}
-	if server.activeCommand != "" {
-		t.Fatalf("expected active command cleared after timeout completion")
+	if server.activeCommand != command.CommandID {
+		t.Fatalf("expected active command to remain replayable after timeout, got %q", server.activeCommand)
 	}
 	update := server.commands[command.CommandID].NodeUpdates["node-2"]
 	if update.Status != protocol.ShutdownStatusTimeout {
@@ -446,6 +447,8 @@ func TestReplayPendingShutdownAllowsTimedOutNodeWithoutFinalState(t *testing.T) 
 		},
 		TimeoutAt: &timeoutAt,
 	}
+	server.activeCommand = "shutdown-timeout"
+	server.shutdownIssued.Store(true)
 
 	conn, peer := net.Pipe()
 	defer conn.Close()
@@ -465,6 +468,55 @@ func TestReplayPendingShutdownAllowsTimedOutNodeWithoutFinalState(t *testing.T) 
 	}
 	if env.Type != protocol.TypeShutdown {
 		t.Fatalf("expected shutdown replay, got %s", env.Type)
+	}
+}
+
+func TestReplayPendingShutdownRequiresActiveCommand(t *testing.T) {
+	server := NewServer(config.MasterConfig{})
+	issuedAt := time.Now().UTC().Add(-5 * time.Second)
+	timeoutAt := issuedAt.Add(1 * time.Second)
+	server.commands["shutdown-old"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-old",
+			Reason:    "ups low",
+			IssuedAt:  issuedAt,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{
+			"node-1": {
+				CommandID: "shutdown-old",
+				NodeID:    "node-1",
+				Status:    protocol.ShutdownStatusTimeout,
+				AckedAt:   issuedAt.Add(2 * time.Second),
+			},
+		},
+		TimeoutAt: &timeoutAt,
+	}
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+
+	client := NewClient(conn)
+	client.NodeID = "node-1"
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.replayPendingShutdown(client)
+	}()
+
+	if err := peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buffer := make([]byte, 1)
+	if _, err := peer.Read(buffer); err == nil {
+		t.Fatalf("expected no replay when command is no longer active")
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout when no replay is sent, got %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("replay pending shutdown: %v", err)
 	}
 }
 
@@ -577,6 +629,262 @@ func TestStatusIncludesLatestUPSState(t *testing.T) {
 	}
 }
 
+func TestTriggerShutdownStartsLocalShutdownWait(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		DryRun:         true,
+		CommandTimeout: config.Duration{Duration: 30 * time.Second},
+		LocalShutdown: config.LocalShutdownConfig{
+			Enabled:                 true,
+			Command:                 []string{"shutdown", "-h", "now"},
+			MaxWait:                 config.Duration{Duration: 15 * time.Minute},
+			EmergencyRuntimeMinutes: 15,
+		},
+	})
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+
+	client := NewClient(conn)
+	client.NodeID = "node-1"
+	server.registry.Set(client)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := server.TriggerShutdown(protocol.ShutdownRequest{Reason: "manual"})
+		errCh <- err
+	}()
+
+	readEnvelopeFromConn(t, peer)
+	if err := <-errCh; err != nil {
+		t.Fatalf("trigger shutdown: %v", err)
+	}
+
+	status := server.Status()
+	if status.LocalShutdown == nil {
+		t.Fatalf("expected local shutdown status")
+	}
+	if !status.LocalShutdown.Enabled {
+		t.Fatalf("expected local shutdown to be enabled in status")
+	}
+	if status.LocalShutdown.Phase != protocol.LocalShutdownPhaseWaitingRemote {
+		t.Fatalf("expected waiting_remote phase, got %q", status.LocalShutdown.Phase)
+	}
+	if status.LocalShutdown.CommandID == "" {
+		t.Fatalf("expected command id to be recorded")
+	}
+	if status.LocalShutdown.StartedAt == nil {
+		t.Fatalf("expected started_at to be set")
+	}
+	if status.LocalShutdown.DeadlineAt == nil {
+		t.Fatalf("expected deadline_at to be set")
+	}
+}
+
+func TestResetActiveCommandClearsPendingLocalShutdown(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		LocalShutdown: config.LocalShutdownConfig{
+			Enabled:                 true,
+			Command:                 []string{"shutdown", "-h", "now"},
+			MaxWait:                 config.Duration{Duration: 15 * time.Minute},
+			EmergencyRuntimeMinutes: 15,
+		},
+	})
+	now := time.Now().UTC()
+	deadline := now.Add(15 * time.Minute)
+	server.localShutdown = &localShutdownState{
+		Phase:      protocol.LocalShutdownPhaseWaitingRemote,
+		CommandID:  "shutdown-1",
+		StartedAt:  &now,
+		DeadlineAt: &deadline,
+	}
+	server.activeCommand = "shutdown-1"
+	server.shutdownIssued.Store(true)
+
+	server.ResetActiveCommand()
+
+	status := server.Status()
+	if status.LocalShutdown == nil {
+		t.Fatalf("expected local shutdown status")
+	}
+	if status.LocalShutdown.Phase != protocol.LocalShutdownPhaseIdle {
+		t.Fatalf("expected idle phase after reset, got %q", status.LocalShutdown.Phase)
+	}
+	if status.LocalShutdown.CommandID != "" {
+		t.Fatalf("expected command id to be cleared, got %q", status.LocalShutdown.CommandID)
+	}
+}
+
+func TestRemoteCompletionTriggersLocalShutdown(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		DryRun: true,
+		LocalShutdown: config.LocalShutdownConfig{
+			Enabled:                 true,
+			Command:                 []string{"shutdown", "-h", "now"},
+			MaxWait:                 config.Duration{Duration: 15 * time.Minute},
+			EmergencyRuntimeMinutes: 15,
+		},
+	})
+	recorder := &localShutdownRecorder{}
+	server.localShutdownRunner = recorder.run
+
+	issuedAt := time.Now().UTC()
+	deadline := issuedAt.Add(15 * time.Minute)
+	server.commands["shutdown-1"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-1",
+			Reason:    "ups low",
+			IssuedAt:  issuedAt,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{},
+	}
+	server.activeCommand = "shutdown-1"
+	server.shutdownIssued.Store(true)
+	server.localShutdown = &localShutdownState{
+		Phase:      protocol.LocalShutdownPhaseWaitingRemote,
+		CommandID:  "shutdown-1",
+		StartedAt:  &issuedAt,
+		DeadlineAt: &deadline,
+	}
+
+	server.recordShutdownUpdate(protocol.ShutdownAckMessage{
+		CommandID: "shutdown-1",
+		NodeID:    "node-1",
+		Status:    protocol.ShutdownStatusExecuted,
+		AckedAt:   issuedAt.Add(10 * time.Second),
+	})
+
+	if got := recorder.lastTrigger(); got != protocol.LocalShutdownTriggerRemoteComplete {
+		t.Fatalf("expected remote_complete trigger, got %q", got)
+	}
+	status := server.Status()
+	if status.LocalShutdown == nil {
+		t.Fatalf("expected local shutdown status")
+	}
+	if status.LocalShutdown.Trigger != protocol.LocalShutdownTriggerRemoteComplete {
+		t.Fatalf("expected trigger remote_complete, got %q", status.LocalShutdown.Trigger)
+	}
+	if status.LocalShutdown.Phase != protocol.LocalShutdownPhaseCompleted {
+		t.Fatalf("expected completed phase in dry run, got %q", status.LocalShutdown.Phase)
+	}
+}
+
+func TestEmergencyRuntimeTriggersFinalReplayAndLocalShutdown(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		DryRun: true,
+		LocalShutdown: config.LocalShutdownConfig{
+			Enabled:                 true,
+			Command:                 []string{"shutdown", "-h", "now"},
+			MaxWait:                 config.Duration{Duration: 15 * time.Minute},
+			EmergencyRuntimeMinutes: 15,
+		},
+	})
+	recorder := &localShutdownRecorder{}
+	server.localShutdownRunner = recorder.run
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+	client := NewClient(conn)
+	client.NodeID = "node-1"
+	server.registry.Set(client)
+
+	now := time.Now().UTC()
+	deadline := now.Add(15 * time.Minute)
+	server.commands["shutdown-1"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-1",
+			Reason:    "ups low",
+			IssuedAt:  now,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{},
+	}
+	server.activeCommand = "shutdown-1"
+	server.shutdownIssued.Store(true)
+	server.localShutdown = &localShutdownState{
+		Phase:      protocol.LocalShutdownPhaseWaitingRemote,
+		CommandID:  "shutdown-1",
+		StartedAt:  &now,
+		DeadlineAt: &deadline,
+	}
+
+	server.evaluateLocalShutdown(now.Add(1*time.Minute), &UPSStatus{
+		OnBattery:      true,
+		BatteryCharge:  10,
+		RuntimeMinutes: 5,
+	})
+
+	env := readEnvelopeFromConn(t, peer)
+	if env.Type != protocol.TypeShutdown {
+		t.Fatalf("expected final shutdown replay, got %s", env.Type)
+	}
+	if got := recorder.lastTrigger(); got != protocol.LocalShutdownTriggerEmergencyRuntime {
+		t.Fatalf("expected emergency_runtime trigger, got %q", got)
+	}
+	status := server.Status()
+	if status.LocalShutdown == nil {
+		t.Fatalf("expected local shutdown status")
+	}
+	if status.LocalShutdown.Phase != protocol.LocalShutdownPhaseCompleted {
+		t.Fatalf("expected completed phase in dry run, got %q", status.LocalShutdown.Phase)
+	}
+	if status.LocalShutdown.LastRebroadcastAt == nil {
+		t.Fatalf("expected rebroadcast timestamp to be recorded")
+	}
+}
+
+func TestLocalShutdownWaitExpiryTriggersLocalShutdown(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		DryRun: true,
+		LocalShutdown: config.LocalShutdownConfig{
+			Enabled:                 true,
+			Command:                 []string{"shutdown", "-h", "now"},
+			MaxWait:                 config.Duration{Duration: 15 * time.Minute},
+			EmergencyRuntimeMinutes: 15,
+		},
+	})
+	recorder := &localShutdownRecorder{}
+	server.localShutdownRunner = recorder.run
+
+	startedAt := time.Now().UTC().Add(-20 * time.Minute)
+	deadline := startedAt.Add(15 * time.Minute)
+	server.commands["shutdown-1"] = &shutdownCommandState{
+		Message: protocol.ShutdownMessage{
+			CommandID: "shutdown-1",
+			Reason:    "ups low",
+			IssuedAt:  startedAt,
+			Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
+		},
+		TargetNodes: map[string]struct{}{"node-1": {}},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{},
+	}
+	server.activeCommand = "shutdown-1"
+	server.shutdownIssued.Store(true)
+	server.localShutdown = &localShutdownState{
+		Phase:      protocol.LocalShutdownPhaseWaitingRemote,
+		CommandID:  "shutdown-1",
+		StartedAt:  &startedAt,
+		DeadlineAt: &deadline,
+	}
+
+	server.evaluateLocalShutdown(time.Now().UTC(), nil)
+
+	if got := recorder.lastTrigger(); got != protocol.LocalShutdownTriggerWaitExpired {
+		t.Fatalf("expected wait_expired trigger, got %q", got)
+	}
+	status := server.Status()
+	if status.LocalShutdown == nil {
+		t.Fatalf("expected local shutdown status")
+	}
+	if status.LocalShutdown.Trigger != protocol.LocalShutdownTriggerWaitExpired {
+		t.Fatalf("expected trigger wait_expired, got %q", status.LocalShutdown.Trigger)
+	}
+}
+
 func TestRecordUPSSuccessLogsWhenEnabled(t *testing.T) {
 	server := NewServer(config.MasterConfig{
 		LogUPSStatus: true,
@@ -664,4 +972,25 @@ func captureStandardLog(t *testing.T) (*bytes.Buffer, func()) {
 		log.SetFlags(previousFlags)
 		log.SetPrefix(previousPrefix)
 	}
+}
+
+type localShutdownRecorder struct {
+	mu       sync.Mutex
+	triggers []string
+}
+
+func (r *localShutdownRecorder) run(_ []string, trigger string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.triggers = append(r.triggers, trigger)
+	return nil
+}
+
+func (r *localShutdownRecorder) lastTrigger() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.triggers) == 0 {
+		return ""
+	}
+	return r.triggers[len(r.triggers)-1]
 }

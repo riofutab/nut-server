@@ -19,6 +19,14 @@ shutdown_policy:
   min_battery_charge: 30
   min_runtime_minutes: 15
   shutdown_reason: "UPS battery threshold reached"
+local_shutdown:
+  enabled: false
+  command:
+    - "/sbin/shutdown"
+    - "-h"
+    - "now"
+  max_wait: "15m"
+  emergency_runtime_minutes: 15
 snmp:
   target: "192.168.1.10"
   port: 161

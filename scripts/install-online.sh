@@ -20,7 +20,7 @@ usage() {
 usage: install-online.sh --role <master|slave|upgrade-master|upgrade-slave> [--version <tag>|latest] [--repo <owner/repo>] [--arch <amd64|arm64>] -- [role-script options]
 
 Examples:
-  ./scripts/install-online.sh --role master --version v0.1.3 -- --token your-token --snmp-target 10.0.0.31
+  ./scripts/install-online.sh --role master --version v0.1.4 -- --token your-token --snmp-target 10.0.0.31
   ./scripts/install-online.sh --role slave --version latest -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
   ./scripts/install-online.sh --role upgrade-master --version latest
 EOF

@@ -18,8 +18,18 @@ type MasterConfig struct {
 	DryRun          bool           `yaml:"dry_run"`
 	LogUPSStatus    bool           `yaml:"log_ups_status"`
 	TLS             TLSConfig      `yaml:"tls"`
+	LocalShutdown   LocalShutdownConfig `yaml:"local_shutdown"`
 	ShutdownPolicy  ShutdownPolicy `yaml:"shutdown_policy"`
 	SNMP            SNMPConfig     `yaml:"snmp"`
+}
+
+type LocalShutdownConfig struct {
+	Enabled                 bool     `yaml:"enabled"`
+	Command                 []string `yaml:"command"`
+	MaxWait                 Duration `yaml:"max_wait"`
+	EmergencyRuntimeMinutes int      `yaml:"emergency_runtime_minutes"`
+	maxWaitSet              bool
+	emergencyRuntimeSet     bool
 }
 
 type ShutdownPolicy struct {
@@ -77,6 +87,25 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("parse duration %q: %w", raw, err)
 	}
 	d.Duration = duration
+	return nil
+}
+
+func (c *LocalShutdownConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawLocalShutdownConfig LocalShutdownConfig
+	var raw rawLocalShutdownConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*c = LocalShutdownConfig(raw)
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		switch key {
+		case "max_wait":
+			c.maxWaitSet = true
+		case "emergency_runtime_minutes":
+			c.emergencyRuntimeSet = true
+		}
+	}
 	return nil
 }
 
@@ -154,6 +183,24 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	}
 	if cfg.CommandTimeout.Duration == 0 {
 		cfg.CommandTimeout.Duration = 30 * time.Second
+	}
+	if cfg.LocalShutdown.Enabled && cfg.LocalShutdown.Command != nil && len(cfg.LocalShutdown.Command) == 0 {
+		return MasterConfig{}, fmt.Errorf("local_shutdown.command must not be empty when local_shutdown.enabled is true")
+	}
+	if len(cfg.LocalShutdown.Command) == 0 {
+		cfg.LocalShutdown.Command = []string{"/sbin/shutdown", "-h", "now"}
+	}
+	if cfg.LocalShutdown.maxWaitSet && cfg.LocalShutdown.MaxWait.Duration <= 0 {
+		return MasterConfig{}, fmt.Errorf("local_shutdown.max_wait must be greater than zero")
+	}
+	if cfg.LocalShutdown.MaxWait.Duration == 0 {
+		cfg.LocalShutdown.MaxWait.Duration = 15 * time.Minute
+	}
+	if cfg.LocalShutdown.emergencyRuntimeSet && cfg.LocalShutdown.EmergencyRuntimeMinutes <= 0 {
+		return MasterConfig{}, fmt.Errorf("local_shutdown.emergency_runtime_minutes must be greater than zero")
+	}
+	if cfg.LocalShutdown.EmergencyRuntimeMinutes == 0 {
+		cfg.LocalShutdown.EmergencyRuntimeMinutes = 15
 	}
 	if err := cfg.TLS.ValidateServer(); err != nil {
 		return MasterConfig{}, err

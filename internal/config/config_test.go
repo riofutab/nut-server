@@ -116,6 +116,97 @@ snmp:
 	}
 }
 
+func TestLoadMasterConfigDefaultsLocalShutdown(t *testing.T) {
+	configPath := writeConfigFile(t, `
+listen_addr: ":9000"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+`)
+
+	cfg, err := LoadMasterConfig(configPath)
+	if err != nil {
+		t.Fatalf("load master config: %v", err)
+	}
+	if cfg.LocalShutdown.Enabled {
+		t.Fatalf("expected local_shutdown.enabled to default to false")
+	}
+	if len(cfg.LocalShutdown.Command) != 3 {
+		t.Fatalf("expected default local shutdown command, got %v", cfg.LocalShutdown.Command)
+	}
+	if cfg.LocalShutdown.Command[0] != "/sbin/shutdown" || cfg.LocalShutdown.Command[1] != "-h" || cfg.LocalShutdown.Command[2] != "now" {
+		t.Fatalf("unexpected default local shutdown command: %v", cfg.LocalShutdown.Command)
+	}
+	if cfg.LocalShutdown.MaxWait.Duration.String() != "15m0s" {
+		t.Fatalf("expected default local_shutdown.max_wait to be 15m, got %v", cfg.LocalShutdown.MaxWait.Duration)
+	}
+	if cfg.LocalShutdown.EmergencyRuntimeMinutes != 15 {
+		t.Fatalf("expected default local_shutdown.emergency_runtime_minutes to be 15, got %d", cfg.LocalShutdown.EmergencyRuntimeMinutes)
+	}
+}
+
+func TestLoadMasterConfigValidatesLocalShutdown(t *testing.T) {
+	testCases := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{
+			name: "enabled requires command",
+			content: `
+listen_addr: ":9000"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+local_shutdown:
+  enabled: true
+  command: []
+`,
+			wantErr: "local_shutdown.command",
+		},
+		{
+			name: "max_wait must be positive",
+			content: `
+listen_addr: ":9000"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+local_shutdown:
+  enabled: true
+  max_wait: "0s"
+`,
+			wantErr: "local_shutdown.max_wait",
+		},
+		{
+			name: "emergency runtime must be positive",
+			content: `
+listen_addr: ":9000"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+local_shutdown:
+  enabled: true
+  emergency_runtime_minutes: 0
+`,
+			wantErr: "local_shutdown.emergency_runtime_minutes",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := writeConfigFile(t, tc.content)
+			_, err := LoadMasterConfig(configPath)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q validation error, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestLoadSlaveConfigDisabledTLSIgnoresCertificateFields(t *testing.T) {
 	configPath := writeConfigFile(t, `
 node_id: "slave-01"

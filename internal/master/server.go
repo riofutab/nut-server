@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +29,8 @@ type Server struct {
 	commands            map[string]*shutdownCommandState
 	activeCommand       string
 	autoShutdownLatched bool
+	localShutdown       *localShutdownState
+	localShutdownRunner func([]string, string) error
 	upsMu               sync.RWMutex
 	upsStatus           *protocol.UPSStatusView
 	tlsConfig           *tls.Config
@@ -42,12 +45,23 @@ type shutdownCommandState struct {
 	ReplayDisabled bool `json:"replay_disabled,omitempty"`
 }
 
+type localShutdownState struct {
+	Phase             string     `json:"phase"`
+	CommandID         string     `json:"command_id,omitempty"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	DeadlineAt        *time.Time `json:"deadline_at,omitempty"`
+	Trigger           string     `json:"trigger,omitempty"`
+	LastRebroadcastAt *time.Time `json:"last_rebroadcast_at,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+}
+
 func NewServer(cfg config.MasterConfig) *Server {
 	server := &Server{
 		cfg:      cfg,
 		registry: NewRegistry(),
 		commands: make(map[string]*shutdownCommandState),
 	}
+	server.localShutdownRunner = server.runLocalShutdownCommand
 	if cfg.SNMP.Target != "" {
 		server.upsStatus = &protocol.UPSStatusView{Target: cfg.SNMP.Target}
 	}
@@ -104,7 +118,9 @@ func (s *Server) runCommandWatcher() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		s.markTimedOutCommands(time.Now().UTC())
+		now := time.Now().UTC()
+		s.markTimedOutCommands(now)
+		s.evaluateLocalShutdown(now, s.latestSuccessfulUPSStatus())
 	}
 }
 
@@ -341,9 +357,23 @@ func (s *Server) triggerShutdown(request protocol.ShutdownRequest, auto bool) (p
 	if auto {
 		s.autoShutdownLatched = true
 	}
+	if s.cfg.LocalShutdown.Enabled {
+		startedAt := message.IssuedAt
+		deadlineAt := startedAt.Add(s.cfg.LocalShutdown.MaxWait.Duration)
+		s.localShutdown = &localShutdownState{
+			Phase:      protocol.LocalShutdownPhaseWaitingRemote,
+			CommandID:  message.CommandID,
+			StartedAt:  &startedAt,
+			DeadlineAt: &deadlineAt,
+		}
+	}
 	s.shutdownIssued.Store(true)
 	s.saveStateLocked()
 	s.commandMu.Unlock()
+
+	if s.cfg.LocalShutdown.Enabled {
+		log.Printf("local shutdown waiting command_id=%s deadline=%s", message.CommandID, message.IssuedAt.Add(s.cfg.LocalShutdown.MaxWait.Duration).Format(time.RFC3339))
+	}
 
 	var firstErr error
 	for _, client := range targets {
@@ -439,7 +469,7 @@ func (s *Server) markTimedOutCommands(now time.Time) {
 		if commandComplete(command) {
 			completedAt := now
 			command.CompletedAt = &completedAt
-			if s.activeCommand == commandID {
+			if s.activeCommand == commandID && !commandHasRepairableTimeout(command) {
 				s.activeCommand = ""
 				s.shutdownIssued.Store(false)
 			}
@@ -452,25 +482,38 @@ func (s *Server) markTimedOutCommands(now time.Time) {
 }
 
 func (s *Server) recordShutdownUpdate(update protocol.ShutdownAckMessage) {
+	var startLocalShutdown bool
+
 	s.commandMu.Lock()
-	defer s.commandMu.Unlock()
 	command, ok := s.commands[update.CommandID]
 	if !ok {
+		s.commandMu.Unlock()
 		return
 	}
 	if existing, exists := command.NodeUpdates[update.NodeID]; exists && !shouldReplaceShutdownUpdate(existing, update) {
+		s.commandMu.Unlock()
 		return
 	}
 	command.NodeUpdates[update.NodeID] = update
 	if commandComplete(command) {
 		now := time.Now().UTC()
 		command.CompletedAt = &now
-		if s.activeCommand == update.CommandID {
+		if s.activeCommand == update.CommandID && !commandHasRepairableTimeout(command) {
 			s.activeCommand = ""
 			s.shutdownIssued.Store(false)
 		}
 	}
+	if remoteShutdownFinished(command) && s.localShutdown != nil && s.localShutdown.CommandID == update.CommandID && s.localShutdown.Phase == protocol.LocalShutdownPhaseWaitingRemote {
+		s.localShutdown.Trigger = protocol.LocalShutdownTriggerRemoteComplete
+		startLocalShutdown = true
+	}
 	s.saveStateLocked()
+	s.commandMu.Unlock()
+
+	if startLocalShutdown {
+		log.Printf("local shutdown triggered by remote completion command_id=%s", update.CommandID)
+		s.beginLocalShutdownExecution(update.CommandID, protocol.LocalShutdownTriggerRemoteComplete)
+	}
 }
 
 func (s *Server) replayPendingShutdown(client *Client) error {
@@ -484,8 +527,12 @@ func (s *Server) replayPendingShutdown(client *Client) error {
 func (s *Server) ResetActiveCommand() {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
+	clearedCommand := s.activeCommand
 	if command, ok := s.commands[s.activeCommand]; ok && command != nil {
 		command.ReplayDisabled = true
+	}
+	if s.localShutdown != nil && s.localShutdown.CommandID == clearedCommand && !localShutdownExecutionStarted(s.localShutdown.Phase) {
+		s.localShutdown = nil
 	}
 	s.activeCommand = ""
 	s.autoShutdownLatched = false
@@ -496,6 +543,7 @@ func (s *Server) ResetActiveCommand() {
 func (s *Server) Status() protocol.StatusResponse {
 	s.commandMu.Lock()
 	activeCommandID := s.activeCommand
+	localShutdown := s.localShutdownStatusLocked()
 	commandCopy := make(map[string]*shutdownCommandState, len(s.commands))
 	for commandID, state := range s.commands {
 		copied := &shutdownCommandState{
@@ -567,6 +615,7 @@ func (s *Server) Status() protocol.StatusResponse {
 		ShutdownIssued: s.shutdownIssued.Load(),
 		ActiveCommand:  activeSummary,
 		UPS:            upsStatus,
+		LocalShutdown:  localShutdown,
 		Nodes:          nodes,
 	}
 }
@@ -664,23 +713,7 @@ func (s *Server) replayableShutdownForNode(nodeID string) (protocol.ShutdownMess
 	if command, ok := s.commands[s.activeCommand]; ok && shouldReplayShutdownForNode(command, nodeID) {
 		return command.Message, true
 	}
-
-	var (
-		selectedMessage protocol.ShutdownMessage
-		selectedTime    time.Time
-		found           bool
-	)
-	for commandID, command := range s.commands {
-		if commandID == s.activeCommand || !shouldReplayShutdownForNode(command, nodeID) {
-			continue
-		}
-		if !found || command.Message.IssuedAt.After(selectedTime) {
-			selectedMessage = command.Message
-			selectedTime = command.Message.IssuedAt
-			found = true
-		}
-	}
-	return selectedMessage, found
+	return protocol.ShutdownMessage{}, false
 }
 
 func commandComplete(command *shutdownCommandState) bool {
@@ -691,6 +724,26 @@ func commandComplete(command *shutdownCommandState) bool {
 		}
 	}
 	return len(command.TargetNodes) > 0
+}
+
+func remoteShutdownFinished(command *shutdownCommandState) bool {
+	for nodeID := range command.TargetNodes {
+		update, ok := command.NodeUpdates[nodeID]
+		if !ok || !isFinalShutdownStatus(update.Status) {
+			return false
+		}
+	}
+	return len(command.TargetNodes) > 0
+}
+
+func commandHasRepairableTimeout(command *shutdownCommandState) bool {
+	for nodeID := range command.TargetNodes {
+		update, ok := command.NodeUpdates[nodeID]
+		if ok && update.Status == protocol.ShutdownStatusTimeout {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldReplayShutdownForNode(command *shutdownCommandState, nodeID string) bool {
@@ -735,6 +788,197 @@ func shouldReplaceShutdownUpdate(existing, next protocol.ShutdownAckMessage) boo
 		return isFinalShutdownStatus(next.Status)
 	}
 	return true
+}
+
+func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
+	if !s.cfg.LocalShutdown.Enabled {
+		return
+	}
+
+	var (
+		commandID   string
+		trigger     string
+		replay      protocol.ShutdownMessage
+		replayNodes map[string]struct{}
+	)
+
+	s.commandMu.Lock()
+	if s.localShutdown == nil {
+		s.commandMu.Unlock()
+		return
+	}
+
+	state := s.localShutdown
+	switch state.Phase {
+	case protocol.LocalShutdownPhaseWaitingRemote:
+		command, ok := s.commands[state.CommandID]
+		if !ok || s.activeCommand != state.CommandID || command.ReplayDisabled {
+			s.localShutdown = nil
+			s.saveStateLocked()
+			s.commandMu.Unlock()
+			return
+		}
+		if upsStatus != nil && upsStatus.RuntimeMinutes > 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes {
+			rebroadcastAt := now
+			state.Phase = protocol.LocalShutdownPhaseEmergency
+			state.Trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+			state.LastRebroadcastAt = &rebroadcastAt
+			commandID = state.CommandID
+			trigger = state.Trigger
+			replay = command.Message
+			replayNodes = replayableNodeIDs(command)
+			s.saveStateLocked()
+		} else if state.DeadlineAt != nil && !now.Before(*state.DeadlineAt) {
+			state.Phase = protocol.LocalShutdownPhaseWaitExpired
+			state.Trigger = protocol.LocalShutdownTriggerWaitExpired
+			commandID = state.CommandID
+			trigger = state.Trigger
+			s.saveStateLocked()
+		}
+	case protocol.LocalShutdownPhaseWaitExpired:
+		commandID = state.CommandID
+		trigger = protocol.LocalShutdownTriggerWaitExpired
+	case protocol.LocalShutdownPhaseEmergency:
+		commandID = state.CommandID
+		trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+	}
+	s.commandMu.Unlock()
+
+	if len(replayNodes) > 0 {
+		log.Printf("local shutdown emergency replay command_id=%s nodes=%d", replay.CommandID, len(replayNodes))
+		s.replayShutdownToNodes(replay, replayNodes)
+	}
+	if commandID != "" {
+		if trigger == protocol.LocalShutdownTriggerWaitExpired {
+			log.Printf("local shutdown wait expired command_id=%s", commandID)
+		}
+		s.beginLocalShutdownExecution(commandID, trigger)
+	}
+}
+
+func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
+	command := append([]string(nil), s.cfg.LocalShutdown.Command...)
+
+	s.commandMu.Lock()
+	if s.localShutdown == nil || s.localShutdown.CommandID != commandID || localShutdownExecutionStarted(s.localShutdown.Phase) {
+		s.commandMu.Unlock()
+		return
+	}
+	s.localShutdown.Phase = protocol.LocalShutdownPhaseExecuting
+	s.localShutdown.Trigger = trigger
+	s.localShutdown.LastError = ""
+	s.saveStateLocked()
+	s.commandMu.Unlock()
+
+	log.Printf("local shutdown starting command_id=%s trigger=%s", commandID, trigger)
+	err := s.localShutdownRunner(command, trigger)
+
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	if s.localShutdown == nil || s.localShutdown.CommandID != commandID {
+		return
+	}
+	if err != nil {
+		s.localShutdown.Phase = protocol.LocalShutdownPhaseFailed
+		s.localShutdown.LastError = err.Error()
+		log.Printf("local shutdown failed command_id=%s trigger=%s err=%v", commandID, trigger, err)
+	} else {
+		s.localShutdown.Phase = protocol.LocalShutdownPhaseCompleted
+		s.localShutdown.LastError = ""
+	}
+	s.saveStateLocked()
+}
+
+func (s *Server) runLocalShutdownCommand(command []string, trigger string) error {
+	if len(command) == 0 {
+		return fmt.Errorf("local shutdown command is empty")
+	}
+	if s.cfg.DryRun {
+		log.Printf("dry-run local shutdown trigger=%s command=%v", trigger, command)
+		return nil
+	}
+	return exec.Command(command[0], command[1:]...).Run()
+}
+
+func (s *Server) replayShutdownToNodes(message protocol.ShutdownMessage, nodeIDs map[string]struct{}) {
+	for _, client := range s.registry.List() {
+		if _, ok := nodeIDs[client.NodeID]; !ok {
+			continue
+		}
+		go func(client *Client) {
+			if err := client.Send(protocol.TypeShutdown, message); err != nil {
+				log.Printf("rebroadcast shutdown to %s failed: %v", client.NodeID, err)
+			}
+		}(client)
+	}
+}
+
+func replayableNodeIDs(command *shutdownCommandState) map[string]struct{} {
+	nodeIDs := make(map[string]struct{}, len(command.TargetNodes))
+	for nodeID := range command.TargetNodes {
+		if shouldReplayShutdownForNode(command, nodeID) {
+			nodeIDs[nodeID] = struct{}{}
+		}
+	}
+	return nodeIDs
+}
+
+func localShutdownExecutionStarted(phase string) bool {
+	switch phase {
+	case protocol.LocalShutdownPhaseExecuting, protocol.LocalShutdownPhaseCompleted, protocol.LocalShutdownPhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) localShutdownStatusLocked() *protocol.LocalShutdownStatus {
+	if !s.cfg.LocalShutdown.Enabled {
+		return nil
+	}
+	status := &protocol.LocalShutdownStatus{
+		Enabled: true,
+		Phase:   protocol.LocalShutdownPhaseIdle,
+	}
+	if s.localShutdown == nil {
+		return status
+	}
+	status.Phase = s.localShutdown.Phase
+	status.CommandID = s.localShutdown.CommandID
+	status.StartedAt = copyTime(s.localShutdown.StartedAt)
+	status.DeadlineAt = copyTime(s.localShutdown.DeadlineAt)
+	status.Trigger = s.localShutdown.Trigger
+	status.LastRebroadcastAt = copyTime(s.localShutdown.LastRebroadcastAt)
+	status.LastError = s.localShutdown.LastError
+	return status
+}
+
+func (s *Server) latestSuccessfulUPSStatus() *UPSStatus {
+	view := s.currentUPSStatus()
+	if view == nil || view.LastSuccessAt == nil || view.RuntimeMinutes == nil {
+		return nil
+	}
+	if view.LastErrorAt != nil && !view.LastSuccessAt.After(*view.LastErrorAt) {
+		return nil
+	}
+	status := &UPSStatus{
+		RuntimeMinutes: *view.RuntimeMinutes,
+	}
+	if view.OnBattery != nil {
+		status.OnBattery = *view.OnBattery
+	}
+	if view.BatteryCharge != nil {
+		status.BatteryCharge = *view.BatteryCharge
+	}
+	return status
+}
+
+func copyTime(src *time.Time) *time.Time {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
 }
 
 func (s *Server) recordUPSSuccess(status UPSStatus, polledAt time.Time) {

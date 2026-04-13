@@ -112,9 +112,37 @@ type UPSStatusView struct {
 	LastErrorAt    *time.Time `json:"last_error_at,omitempty"`
 }
 
+const (
+	LocalShutdownPhaseIdle          = "idle"
+	LocalShutdownPhaseWaitingRemote = "waiting_remote"
+	LocalShutdownPhaseWaitExpired   = "wait_expired"
+	LocalShutdownPhaseEmergency     = "emergency"
+	LocalShutdownPhaseExecuting     = "executing"
+	LocalShutdownPhaseCompleted     = "completed"
+	LocalShutdownPhaseFailed        = "failed"
+)
+
+const (
+	LocalShutdownTriggerRemoteComplete   = "remote_complete"
+	LocalShutdownTriggerWaitExpired      = "wait_expired"
+	LocalShutdownTriggerEmergencyRuntime = "emergency_runtime"
+)
+
+type LocalShutdownStatus struct {
+	Enabled           bool       `json:"enabled"`
+	Phase             string     `json:"phase"`
+	CommandID         string     `json:"command_id,omitempty"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	DeadlineAt        *time.Time `json:"deadline_at,omitempty"`
+	Trigger           string     `json:"trigger,omitempty"`
+	LastRebroadcastAt *time.Time `json:"last_rebroadcast_at,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+}
+
 type StatusResponse struct {
-	ShutdownIssued bool            `json:"shutdown_issued"`
-	ActiveCommand  *CommandSummary `json:"active_command,omitempty"`
-	UPS            *UPSStatusView  `json:"ups,omitempty"`
-	Nodes          []NodeStatus    `json:"nodes"`
+	ShutdownIssued bool                 `json:"shutdown_issued"`
+	ActiveCommand  *CommandSummary      `json:"active_command,omitempty"`
+	UPS            *UPSStatusView       `json:"ups,omitempty"`
+	LocalShutdown  *LocalShutdownStatus `json:"local_shutdown,omitempty"`
+	Nodes          []NodeStatus         `json:"nodes"`
 }

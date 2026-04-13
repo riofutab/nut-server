@@ -103,6 +103,10 @@ go run ./cmd/nut-slave -config config/slave.yaml
 - `poll_interval`: SNMP 轮询间隔
 - `command_timeout`: shutdown 命令等待终态的最长时间，超时节点会记为 `timeout`
 - `dry_run`: 是否仅验证链路而不执行真实关机
+- `local_shutdown.enabled`: 是否让 master 在远端节点处理后再关闭本机
+- `local_shutdown.command`: master 本机关机时执行的命令，默认 `/sbin/shutdown -h now`
+- `local_shutdown.max_wait`: 等待远端节点完成的最长时间
+- `local_shutdown.emergency_runtime_minutes`: 等待期间触发“最后补发一次远端关机并立即关闭本机”的紧急阈值
 - `tls.enabled`: 是否启用 TLS 监听
 - `tls.disabled`: 强制关闭 TLS，并忽略其它 TLS 证书字段
 - `tls.cert_file`: master 证书文件路径
@@ -369,7 +373,7 @@ sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10
 Online install can download a published release package and hand off to the role-specific install or upgrade script:
 
 ```bash
-sudo ./scripts/install-online.sh --role master --version v0.1.3 -- --token your-token --snmp-target 10.0.0.31
+sudo ./scripts/install-online.sh --role master --version v0.1.4 -- --token your-token --snmp-target 10.0.0.31
 sudo ./scripts/install-online.sh --role slave --version latest -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
 sudo ./scripts/install-online.sh --role upgrade-master --version latest
 ```
@@ -380,6 +384,19 @@ Upgrade scripts only replace binaries and systemd unit files. Existing config an
 sudo ./scripts/upgrade-master.sh
 sudo ./scripts/upgrade-slave.sh
 ```
+
+## Master Local Shutdown
+
+If the master host itself also needs to shut down, but only after the remote nodes have had a chance to stop first, enable this in `/etc/nut-server/master.yaml`:
+
+```yaml
+local_shutdown:
+  enabled: true
+  max_wait: "15m"
+  emergency_runtime_minutes: 15
+```
+
+After a shutdown event starts, the master will wait for remote nodes first. It will then shut down its own machine when all remote nodes finish, when `max_wait` expires, or immediately after a final rebroadcast if UPS runtime drops below the emergency threshold. You do not need to install a local slave on the master host for this.
 
 ## UPS Poll Visibility
 
