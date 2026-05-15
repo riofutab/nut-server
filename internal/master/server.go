@@ -24,6 +24,7 @@ import (
 type Server struct {
 	cfg                 config.MasterConfig
 	registry            *Registry
+	directory           *NodeDirectory
 	commandSeq          atomic.Uint64
 	shutdownIssued      atomic.Bool
 	commandMu           sync.Mutex
@@ -58,9 +59,10 @@ type localShutdownState struct {
 
 func NewServer(cfg config.MasterConfig) *Server {
 	server := &Server{
-		cfg:      cfg,
-		registry: NewRegistry(),
-		commands: make(map[string]*shutdownCommandState),
+		cfg:       cfg,
+		registry:  NewRegistry(),
+		directory: NewNodeDirectory(),
+		commands:  make(map[string]*shutdownCommandState),
 	}
 	server.localShutdownRunner = server.runLocalShutdownCommand
 	if cfg.SNMP.Target != "" {
@@ -213,6 +215,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	client.Tags = register.Tags
 	client.Touch()
 	s.registry.Set(client)
+	s.directory.Observe(register.NodeID, register.Hostname, register.Tags, time.Now().UTC())
 
 	if err := client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: true, Message: "registered"}); err != nil {
 		log.Printf("ack register to %s failed: %v", client.NodeID, err)
@@ -234,6 +237,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 		client.Touch()
+		s.directory.Touch(client.NodeID, time.Now().UTC())
 		if err := s.handleEnvelope(client, env); err != nil {
 			log.Printf("handle %s from %s failed: %v", env.Type, client.NodeID, err)
 		}
