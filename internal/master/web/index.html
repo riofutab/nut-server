@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nut-master status</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #24292f;
+  --muted: #6e7681;
+  --card-bg: #f6f8fa;
+  --border: #d0d7de;
+  --online: #1a7f37;
+  --offline: #cf222e;
+  --neverSeen: #6e7681;
+  --badge-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --card-bg: #161b22;
+    --border: #30363d;
+    --online: #3fb950;
+    --offline: #f85149;
+    --neverSeen: #8b949e;
+    --badge-bg: #30363d;
+  }
+}
+body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  max-width: 960px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+h1, h2 { font-weight: 500; margin: 0.5rem 0; }
+h2 { font-size: 1rem; }
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+th, td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th { font-weight: 500; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.state-online    { color: var(--online); }
+.state-offline   { color: var(--offline); }
+.state-never_seen { color: var(--neverSeen); }
+.badge {
+  display: inline-block;
+  padding: 0 0.45rem;
+  border-radius: 3px;
+  background: var(--badge-bg);
+  font-size: 0.85em;
+  margin-right: 0.25rem;
+}
+.muted { color: var(--muted); }
+.error { color: var(--offline); }
+footer { color: var(--muted); font-size: 0.85em; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>nut-master</h1>
+<div id="error" class="card error" style="display:none"></div>
+<div id="ups" class="card"></div>
+<div id="nodes" class="card"></div>
+<div id="command" class="card"></div>
+<footer><span id="updated"></span></footer>
+
+<script>
+const STORAGE_KEY = 'nut_admin_token';
+
+function getToken() {
+  let t = sessionStorage.getItem(STORAGE_KEY);
+  if (!t) {
+    t = window.prompt('admin_token:');
+    if (t) sessionStorage.setItem(STORAGE_KEY, t);
+  }
+  return t;
+}
+
+function clearToken() {
+  sessionStorage.removeItem(STORAGE_KEY);
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function fmtAge(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const seconds = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (seconds < 0)   return d.toLocaleString();
+  if (seconds < 60)  return seconds + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60)  return minutes + 'm ago';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24)    return hours + 'h ago';
+  const days = Math.floor(hours / 24);
+  return days + 'd ago';
+}
+
+function renderUps(ups) {
+  const el = document.getElementById('ups');
+  if (!ups) { el.innerHTML = '<h2>UPS</h2><p class=muted>not configured</p>'; return; }
+  const rows = [
+    ['target',       ups.target || '—'],
+    ['on battery',   ups.on_battery == null ? '—' : (ups.on_battery ? 'yes' : 'no')],
+    ['charge',       ups.battery_charge == null ? '—' : ups.battery_charge + '%'],
+    ['runtime',      ups.runtime_minutes == null ? '—' : ups.runtime_minutes + 'm'],
+    ['last poll',    fmtAge(ups.last_success_at)],
+  ];
+  let extra = '';
+  if (ups.last_error) {
+    extra = '<p class=error>last error: ' + escape(ups.last_error) + ' (' + fmtAge(ups.last_error_at) + ')</p>';
+  }
+  el.innerHTML = '<h2>UPS</h2><table>' +
+    rows.map(r => '<tr><td>' + r[0] + '</td><td>' + escape(String(r[1])) + '</td></tr>').join('') +
+    '</table>' + extra;
+}
+
+function renderNodes(nodes) {
+  const el = document.getElementById('nodes');
+  if (!nodes || nodes.length === 0) {
+    el.innerHTML = '<h2>Nodes</h2><p class=muted>no nodes registered</p>';
+    return;
+  }
+  const counts = { online: 0, offline: 0, never_seen: 0 };
+  nodes.forEach(n => { counts[n.state] = (counts[n.state] || 0) + 1; });
+  const summary = nodes.length + ' total · ' +
+    counts.online + ' online · ' +
+    counts.offline + ' offline · ' +
+    counts.never_seen + ' never seen';
+  const rows = nodes.map(n => `
+    <tr>
+      <td class="state-${escape(n.state)}">${escape(n.state)}</td>
+      <td>${escape(n.node_id)}${n.expected ? ' <span class=badge>expected</span>' : ''}</td>
+      <td>${escape(n.hostname || '')}</td>
+      <td>${(n.tags || []).map(t => '<span class=badge>'+escape(t)+'</span>').join('')}</td>
+      <td>${fmtAge(n.last_seen)}</td>
+    </tr>`).join('');
+  el.innerHTML = `
+    <h2>Nodes <span class=muted>(${summary})</span></h2>
+    <table>
+      <tr><th>state</th><th>node_id</th><th>hostname</th><th>tags</th><th>last seen</th></tr>
+      ${rows}
+    </table>`;
+}
+
+function renderCommand(cmd) {
+  const el = document.getElementById('command');
+  if (!cmd) { el.innerHTML = '<h2>Active command</h2><p class=muted>none</p>'; return; }
+  el.innerHTML = `
+    <h2>Active command <span class=muted>${escape(cmd.command_id)}</span></h2>
+    <p>reason: ${escape(cmd.reason)} · ${cmd.executed||0}/${cmd.targeted} executed · ${cmd.failed||0} failed · ${cmd.timeout||0} timed out · issued ${fmtAge(cmd.issued_at)}</p>`;
+}
+
+async function refresh() {
+  const token = getToken();
+  if (!token) return;
+  const errEl = document.getElementById('error');
+  try {
+    const resp = await fetch('/status', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (resp.status === 401) {
+      clearToken();
+      errEl.style.display = 'block';
+      errEl.textContent = 'invalid token; refresh to re-enter';
+      return;
+    }
+    if (!resp.ok) {
+      errEl.style.display = 'block';
+      errEl.textContent = 'fetch /status failed: ' + resp.status;
+      return;
+    }
+    errEl.style.display = 'none';
+    const data = await resp.json();
+    renderUps(data.ups);
+    renderNodes(data.nodes);
+    renderCommand(data.active_command);
+    document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    errEl.style.display = 'block';
+    errEl.textContent = 'error: ' + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

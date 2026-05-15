@@ -3,6 +3,7 @@ package master
 import (
 	"crypto/subtle"
 	"crypto/tls"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,9 @@ import (
 	"nut-server/internal/protocol"
 	"nut-server/internal/security"
 )
+
+//go:embed web/index.html
+var webFS embed.FS
 
 type Server struct {
 	cfg                 config.MasterConfig
@@ -109,6 +113,7 @@ func (s *Server) Run() error {
 
 func (s *Server) runAdminServer() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
 	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))
@@ -118,6 +123,17 @@ func (s *Server) runAdminServer() {
 	if err := http.ListenAndServe(s.cfg.AdminListenAddr, mux); err != nil {
 		log.Printf("admin server stopped: %v", err)
 	}
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	data, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {

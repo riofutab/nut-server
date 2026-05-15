@@ -1184,3 +1184,25 @@ func TestHandleUnsetExpectedClearsFlagOnly(t *testing.T) {
 		t.Fatal("FirstSeen should be preserved")
 	}
 }
+
+func TestHandleIndexServesEmbeddedHTML(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleIndex(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("content-type=%q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>nut-master status</title>") {
+		t.Fatal("response does not contain expected title")
+	}
+	if !strings.Contains(body, "fetch('/status'") {
+		t.Fatal("response does not reference /status endpoint")
+	}
+}
