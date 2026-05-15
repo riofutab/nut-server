@@ -48,6 +48,53 @@ flowchart LR
 
 UPS 读取默认按 UPS-MIB:`output_source_oid` 判断是否切到电池供电 · `charge_oid` 读取电量百分比 · `runtime_minutes_oid` 读取剩余分钟数。
 
+## Table of Contents
+
+- [Features](#features)
+- [项目结构](#项目结构)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [TLS / mTLS](#tls--mtls)
+- [dry-run](#dry-run)
+- [状态恢复](#状态恢复)
+- [构建 Linux 发布包](#构建-linux-发布包)
+- [systemd 部署](#systemd-部署)
+- [master 本机自关机](#master-本机自关机local_shutdown)
+- [UPS 轮询可观测性](#ups-轮询可观测性)
+- [Prometheus 指标](#prometheus-指标)
+- [开发辅助](#开发辅助)
+- [路线图](#路线图)
+- [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Upgrade Notes](README-upgrade.md)
+
+## Features
+
+### 协议与连接
+- **TCP 长连接 + 行式 JSON 协议**: token 注册, 握手 / 空闲读超时, 写 deadline; 重连用**指数 backoff + ±20% jitter**, 抖动主节点不会被打爆
+- **TLS / mTLS**: master 与 slave 都可选启用; 内网可 `tls.disabled: true` 显式关掉
+- **`auth_tokens` 恒定时间比较** (`crypto/subtle`),不泄漏匹配前缀
+
+### UPS 与关机决策
+- **SNMP UPS 轮询**: UPS-MIB 默认 OID, 可选 `log_ups_status: true` 把成功轮询也写 journal
+- **多策略组合关机条件** (v0.3.0+): `shutdown_policies` 列表, 内部 AND / 多条 OR, target 取并集, reason 拼接;`when.on_battery` 三态对称
+- **关机编排**: 按 `node_id` / `tag` / `all` 定向下发, `command_timeout` 强制超时, 状态文件恢复
+- **master 本机关机**: 远端节点完成后再关本机, `max_wait` 兜底 + `emergency_runtime_minutes` 紧急阈值
+
+### 管理与可观测
+- **管理 API**: `/status`、`/commands/shutdown`、`/commands/reset`、`/nodes/expect`、`/nodes/{id}`,全部要求 `Authorization: Bearer <admin_token>`
+- **内嵌只读状态页**: `GET /` 直接看 UPS、节点表、活动命令;`admin_token` 仅放 sessionStorage
+- **节点目录**: 每节点 `first_seen` / `last_seen` / `tags` / `hostname`,可预登记"预期但还没上线"的节点
+- **一键装机 endpoint** (v0.3.0+): `GET /install/slave?node_id=X` 返回 curl one-liner,同步把 node 预注册为 `expected`
+- **Prometheus `/metrics`** (v0.3.0+): master admin 口默认开放 (绑回环保护);slave 可选 `metrics_listen_addr` 启用
+- **结构化日志**: `log/slog` JSON handler 输出 `command_id` / `node_id` / `peer` 等字段
+
+### 部署与运维
+- **发布产物**: `.deb` / `.rpm` / `.tar.gz` × amd64 / arm64,附带 `SHA256SUMS`
+- **`install-online.sh`** 自动检测 `apt` / `yum` / `dnf` 选包格式;`--` 后传 role-script 参数会自动走 tar.gz 路径预填配置
+- **systemd 沙箱化**: master 走 `User=nut-server`,`ProtectSystem=strict`、`ProtectHome`、`PrivateTmp`、`RestrictAddressFamilies` 等全套
+- **状态文件原子写**: tmp + `fsync` + rename,`0600` 权限,崩溃中途不会留半截文件
+- **优雅停机**: SIGTERM / SIGINT 通过 `context.Context` 传到所有 goroutine,systemd stop 不触发 timeout
+- **e2e 集成测试套件** (v0.3.0+): `internal/e2e/` 包 + `e2e` build tag,在 loopback 上真的拉起 master + slave,CI 已接入
+
 ## 项目结构
 
 ```text
@@ -80,22 +127,6 @@ scripts/
   upgrade-master.sh    升级 master 二进制，不改配置/状态
   upgrade-slave.sh     升级 slave 二进制，不改配置/状态
 ```
-
-## 功能
-
-- 主从协议：TCP 长连接 + 行式 JSON 消息，token 注册，重连退避带抖动，握手/空闲读超时
-- SNMP 轮询 UPS：电池/电量/剩余分钟，可选 `log_ups_status` 写入 journal
-- 关机编排：支持按 node_id / tag 定向下发，按 `command_timeout` 强制超时，重启后从状态文件恢复
-- master 本机关机：远端节点完成后再关本机，支持 `max_wait` 兜底和 `emergency_runtime_minutes` 紧急阈值
-- 节点目录（v0.2.0）：master 记录每个节点的 first_seen / last_seen / tags / hostname，可登记"预期但还没上线"的节点
-- 内嵌只读状态页（v0.2.0）：`GET /` 直接看 UPS、节点表、活动命令；admin_token 仅放 sessionStorage
-- 管理 API（v0.2.0）：`/status`、`/commands/shutdown`、`/commands/reset`、`/nodes/expect`、`/nodes/{id}`；全部要求 `Authorization: Bearer <admin_token>`，token 用恒定时间比较
-- 优雅停机（v0.2.0）：SIGTERM/SIGINT 通过 `context.Context` 传到所有 goroutine，systemd stop 不再触发 timeout
-- 结构化日志（v0.2.0）：log/slog JSON handler 输出 `command_id` / `node_id` / `peer` 等命名字段
-- 部署（v0.2.0）：发布包含 `.deb` / `.rpm` / `.tar.gz`，`install-online.sh` 自动检测 apt/yum/dnf 选择安装方式
-- 沙箱：master 与 slave 都以非 root `nut-server` 用户运行；slave 通过受限 sudoers 调用 shutdown
-- TLS / mTLS：master 与 slave 都可选启用
-- Linux amd64 / arm64 同时构建
 
 ## 快速开始
 
@@ -143,12 +174,12 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 
 - `listen_addr`: master 监听地址（slave 注册端口）
 - `admin_listen_addr`: 管理 HTTP 监听地址，默认 `127.0.0.1:9001`，状态页、所有管理 API 和 Prometheus `/metrics` 都在这里(`/metrics` 不鉴权,靠绑回环保护)
-- `admin_token`（**必填**，v0.2.0+）：管理接口的 Bearer token，可用 `openssl rand -hex 24` 生成
+- `admin_token`（**必填**）：管理接口的 Bearer token，可用 `openssl rand -hex 24` 生成
 - `state_file`: master 本地状态文件，保存 active command、节点回执和节点目录，便于重启恢复
 - `auth_tokens`: 允许 slave 注册的 token 列表（恒定时间比较）
 - `poll_interval`: SNMP 轮询间隔
 - `command_timeout`: shutdown 命令等待终态的最长时间，超时节点会记为 `timeout`
-- `offline_after`（v0.2.0+）：节点 `last_seen` 超过该窗口后在 `/status` 中显示为 `offline`，默认 `45s`
+- `offline_after`：节点 `last_seen` 超过该窗口后在 `/status` 中显示为 `offline`，默认 `45s`
 - `dry_run`: 是否仅验证链路而不执行真实关机
 - `local_shutdown.enabled`: 是否让 master 在远端节点处理后再关闭本机
 - `local_shutdown.command`: master 本机关机时执行的命令，默认 `/sbin/shutdown -h now`
@@ -276,7 +307,7 @@ dry_run: true
 - systemd unit：`packaging/systemd/nut-master.service`、`packaging/systemd/nut-slave.service`
 - 服务用户：master 与 slave 都以 `nut-server` 用户运行。slave 通过 `/etc/sudoers.d/nut-server-slave` 受限授权 `shutdown` 命令；master 在安装时通过 systemd 沙箱（`NoNewPrivileges` 等）进一步加固。
 
-### 方案 A：apt / yum / dnf 一键安装（推荐，v0.2.0+）
+### 方案 A：apt / yum / dnf 一键安装（推荐）
 
 ```bash
 # 在线脚本会自动检测包管理器，下载已校验的 .deb 或 .rpm
@@ -356,7 +387,7 @@ sudo ./scripts/install-slave.sh  --node-id slave-01 --master-addr 10.0.0.10:9000
 
 ### 管理接口 / 状态页
 
-管理接口默认监听 `127.0.0.1:9001`，**所有请求都需要 `Authorization: Bearer <admin_token>`**（v0.2.0+）：
+管理接口默认监听 `127.0.0.1:9001`，**所有请求都需要 `Authorization: Bearer <admin_token>`**：
 
 ```bash
 TOKEN=$(sudo awk '/^admin_token:/ {print $2}' /etc/nut-server/master.yaml | tr -d '"')
@@ -409,7 +440,7 @@ sudo systemctl restart nut-master
 sudo journalctl -u nut-master -f -o json-pretty
 ```
 
-由于日志已经迁移到 slog JSON handler（v0.2.0+），journal 可以直接按字段过滤：
+日志走 `log/slog` JSON handler,journal 可以直接按字段过滤:
 
 ```bash
 sudo journalctl -u nut-master -o json | jq 'select(.msg == "ups status")'
@@ -417,7 +448,7 @@ sudo journalctl -u nut-master -o json | jq 'select(.msg == "ups status")'
 
 `/status` 端点也始终返回最新的 UPS 快照（`last_success_at` / `last_error_at` / 当前电量与剩余分钟）。
 
-## Prometheus 指标(v0.3.0+)
+## Prometheus 指标
 
 master 在 admin 口同时暴露 `/metrics`(不鉴权,绑回环保护);slave 可选,通过 `metrics_listen_addr` 启用。
 

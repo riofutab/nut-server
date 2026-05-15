@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 安全问题报告
+    url: https://github.com/riofutab/nut-server/blob/master/SECURITY.md
+    about: 请不要开公开 issue。走 SECURITY.md 里的私密报告流程。
+  - name: 💬 使用问题 / 讨论
+    url: https://github.com/riofutab/nut-server/discussions
+    about: 用法疑问 / 部署建议 / 想法讨论, 建议先开 Discussion 而不是 Issue。
