@@ -127,6 +127,11 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `shutdown_policy.require_on_battery`: 是否要求 UPS 处于电池供电
 - `shutdown_policy.min_battery_charge`: 最低电量阈值
 - `shutdown_policy.min_runtime_minutes`: 最低剩余运行时间阈值（单位：分钟）
+- `shutdown_policies`(v0.3.0+, 可选): 多策略组合。每条 policy 内部 AND, 多条 OR。命中多条时 target 取并集 (任一 `all:true` 则关全部; 否则 tags/node_ids 并集), reason 拼接成 `a; b`。留空时按 `shutdown_policy` 自动合成一条 `default` policy。字段:
+  - `name` (必填, 唯一)
+  - `when.on_battery` / `when.charge_below` / `when.runtime_below` (至少一项)
+  - `target.all` / `target.tags` / `target.node_ids` (全空 → 默认 `all:true`)
+  - `reason` (可选, 缺省自动生成)
 - `snmp.output_source_oid`: 用于判断 UPS 当前输出来源，`5` 视为 battery
 - `snmp.charge_oid`: UPS 电池电量百分比 OID
 - `snmp.runtime_minutes_oid`: UPS 剩余运行时间 OID（单位：分钟）
@@ -433,4 +438,3 @@ go test -tags e2e -count=1 ./internal/e2e/...
 ## 路线图
 
 - 更完整的 SNMP 厂商兼容（APC / Eaton 等）
-- 多策略组合关机条件

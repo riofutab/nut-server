@@ -26,6 +26,23 @@ shutdown_policy:
   min_battery_charge: 30
   min_runtime_minutes: 15
   shutdown_reason: "UPS battery threshold reached"
+# shutdown_policies: 多策略组合。任一 policy 命中即触发;命中多条时 target 取并集
+# (任一 all:true 则关全部;否则 tags / node_ids 并集)。reason 拼接成 'a; b'。
+# 留空时自动用上面的 shutdown_policy 合成一条 'default' policy,旧配置无需改动。
+# shutdown_policies:
+#   - name: dev-early
+#     when:
+#       charge_below: 50
+#     target:
+#       tags: [dev]
+#     reason: "dev nodes shed early"
+#   - name: critical-all
+#     when:
+#       on_battery: true
+#       runtime_below: 5
+#     target:
+#       all: true
+#     reason: "runtime critical"
 local_shutdown:
   enabled: false
   command:

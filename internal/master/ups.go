@@ -34,10 +34,11 @@ func (s *Server) evaluateUPS() error {
 	}
 	s.recordUPSSuccess(status, polledAt)
 	recordUPSPollResult(true)
-	if !ShouldShutdown(status, s.cfg.ShutdownPolicy) {
+	match, triggered := EvaluatePolicies(status, s.cfg.ShutdownPolicies)
+	if !triggered {
 		return nil
 	}
-	_, _, err = s.triggerShutdown(protocol.ShutdownRequest{Reason: s.cfg.ShutdownPolicy.ShutdownReason}, true)
+	_, _, err = s.triggerShutdown(match.ToRequest(), true)
 	if err != nil && err == errShutdownAlreadyActive {
 		return nil
 	}

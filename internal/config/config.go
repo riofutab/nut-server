@@ -23,8 +23,28 @@ type MasterConfig struct {
 	LogUPSStatus    bool           `yaml:"log_ups_status"`
 	TLS             TLSConfig      `yaml:"tls"`
 	LocalShutdown   LocalShutdownConfig `yaml:"local_shutdown"`
-	ShutdownPolicy  ShutdownPolicy `yaml:"shutdown_policy"`
-	SNMP            SNMPConfig     `yaml:"snmp"`
+	ShutdownPolicy   ShutdownPolicy   `yaml:"shutdown_policy"`
+	ShutdownPolicies []ShutdownPolicySpec `yaml:"shutdown_policies"`
+	SNMP             SNMPConfig       `yaml:"snmp"`
+}
+
+type ShutdownPolicySpec struct {
+	Name   string             `yaml:"name"`
+	When   ShutdownPolicyWhen `yaml:"when"`
+	Target ShutdownPolicyTarget `yaml:"target"`
+	Reason string             `yaml:"reason"`
+}
+
+type ShutdownPolicyWhen struct {
+	OnBattery     *bool `yaml:"on_battery"`
+	ChargeBelow   int   `yaml:"charge_below"`
+	RuntimeBelow  int   `yaml:"runtime_below"`
+}
+
+type ShutdownPolicyTarget struct {
+	All     bool     `yaml:"all"`
+	Tags    []string `yaml:"tags"`
+	NodeIDs []string `yaml:"node_ids"`
 }
 
 type LocalShutdownConfig struct {
@@ -228,7 +248,48 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.ShutdownPolicy.ShutdownReason == "" {
 		cfg.ShutdownPolicy.ShutdownReason = "UPS battery threshold reached"
 	}
+	if err := normalizeShutdownPolicies(&cfg); err != nil {
+		return MasterConfig{}, err
+	}
 	return cfg, nil
+}
+
+func normalizeShutdownPolicies(cfg *MasterConfig) error {
+	if len(cfg.ShutdownPolicies) == 0 {
+		on := cfg.ShutdownPolicy.RequireOnBattery
+		spec := ShutdownPolicySpec{
+			Name: "default",
+			When: ShutdownPolicyWhen{
+				OnBattery:    &on,
+				ChargeBelow:  cfg.ShutdownPolicy.MinBatteryCharge,
+				RuntimeBelow: cfg.ShutdownPolicy.MinRuntimeMinutes,
+			},
+			Target: ShutdownPolicyTarget{All: true},
+			Reason: cfg.ShutdownPolicy.ShutdownReason,
+		}
+		cfg.ShutdownPolicies = []ShutdownPolicySpec{spec}
+		return nil
+	}
+	seen := make(map[string]struct{}, len(cfg.ShutdownPolicies))
+	for i, p := range cfg.ShutdownPolicies {
+		if p.Name == "" {
+			return fmt.Errorf("shutdown_policies[%d].name must not be empty", i)
+		}
+		if _, dup := seen[p.Name]; dup {
+			return fmt.Errorf("shutdown_policies[%d].name %q is duplicated", i, p.Name)
+		}
+		seen[p.Name] = struct{}{}
+		if p.When.OnBattery == nil && p.When.ChargeBelow <= 0 && p.When.RuntimeBelow <= 0 {
+			return fmt.Errorf("shutdown_policies[%d] (%q) must specify at least one when condition", i, p.Name)
+		}
+		if !p.Target.All && len(p.Target.Tags) == 0 && len(p.Target.NodeIDs) == 0 {
+			cfg.ShutdownPolicies[i].Target.All = true
+		}
+		if cfg.ShutdownPolicies[i].Reason == "" {
+			cfg.ShutdownPolicies[i].Reason = fmt.Sprintf("policy %s triggered", p.Name)
+		}
+	}
+	return nil
 }
 
 func LoadSlaveConfig(path string) (SlaveConfig, error) {
