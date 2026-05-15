@@ -99,6 +99,25 @@ if [ -z "$TOKEN" ] || [ -z "$SNMP_TARGET" ]; then
   exit 1
 fi
 
+reject_unsafe() {
+  name="$1"
+  value="$2"
+  allowed="$3"
+  case "$value" in
+    *[!${allowed}]*)
+      echo "$name contains characters outside [$allowed]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+reject_unsafe "--token" "$TOKEN" 'a-zA-Z0-9_.\-'
+reject_unsafe "--admin-token" "$ADMIN_TOKEN" 'a-zA-Z0-9_.\-'
+reject_unsafe "--snmp-target" "$SNMP_TARGET" 'a-zA-Z0-9_.\-:'
+reject_unsafe "--snmp-community" "$SNMP_COMMUNITY" 'a-zA-Z0-9_.\-'
+reject_unsafe "--listen-addr" "$LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
+reject_unsafe "--admin-listen-addr" "$ADMIN_LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
+
 if [ "$TLS_DISABLED" = "true" ]; then
   TLS_ENABLED="false"
   TLS_CERT_FILE=""
@@ -177,6 +196,12 @@ if ! getent passwd nut-server >/dev/null; then
 fi
 
 install -d /usr/local/bin /usr/local/lib/nut-server
+for dir in /etc/nut-server /var/lib/nut-server; do
+  if [ -L "$dir" ]; then
+    echo "$dir must not be a symbolic link" >&2
+    exit 1
+  fi
+done
 install -d -o nut-server -g nut-server -m 0750 /etc/nut-server
 install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
 chown -R nut-server:nut-server /var/lib/nut-server

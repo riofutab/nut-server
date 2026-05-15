@@ -96,6 +96,28 @@ if [ -z "$NODE_ID" ] || [ -z "$MASTER_ADDR" ] || [ -z "$TOKEN" ]; then
   exit 1
 fi
 
+reject_unsafe() {
+  name="$1"
+  value="$2"
+  allowed="$3"
+  case "$value" in
+    *[!${allowed}]*)
+      echo "$name contains characters outside [$allowed]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+reject_unsafe "--node-id" "$NODE_ID" 'a-zA-Z0-9_.\-'
+reject_unsafe "--master-addr" "$MASTER_ADDR" 'a-zA-Z0-9_.\-:'
+reject_unsafe "--token" "$TOKEN" 'a-zA-Z0-9_.\-'
+if [ -n "$TAGS" ]; then
+  reject_unsafe "--tags" "$TAGS" 'a-zA-Z0-9_.,\-'
+fi
+if [ -n "$TLS_SERVER_NAME" ]; then
+  reject_unsafe "--tls-server-name" "$TLS_SERVER_NAME" 'a-zA-Z0-9_.\-'
+fi
+
 if [ "$TLS_DISABLED" = "true" ]; then
   TLS_ENABLED="false"
   TLS_CERT_FILE=""

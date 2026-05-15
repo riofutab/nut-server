@@ -118,6 +118,10 @@ func (s *Server) runAdminServer() {
 func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
 	expected := []byte(s.cfg.AdminToken)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if len(expected) == 0 {
+			http.Error(w, "admin token not configured", http.StatusServiceUnavailable)
+			return
+		}
 		header := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(header, prefix) {

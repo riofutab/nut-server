@@ -17,6 +17,11 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	tmpPath := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpPath) }
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("chmod temp: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		cleanup()
@@ -30,10 +35,6 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		cleanup()
 		return fmt.Errorf("close temp: %w", err)
-	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		cleanup()
-		return fmt.Errorf("chmod temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		cleanup()
