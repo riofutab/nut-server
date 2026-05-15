@@ -26,6 +26,7 @@ func (s *Server) runAdminServer(ctx context.Context) {
 	mux.HandleFunc("POST /nodes/expect", s.requireAdminToken(s.handleExpectNode))
 	mux.HandleFunc("DELETE /nodes/expect/{node_id}", s.requireAdminToken(s.handleUnsetExpected))
 	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
+	mux.HandleFunc("GET /install/slave", s.requireAdminToken(s.handleInstallSlave))
 
 	srv := &http.Server{Addr: s.cfg.AdminListenAddr, Handler: mux}
 	go func() {

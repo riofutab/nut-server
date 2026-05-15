@@ -76,3 +76,19 @@ scrape_configs:
 ```
 
 主要指标:`nut_master_ups_poll_total{result}`、`nut_master_ups_on_battery`、`nut_master_ups_battery_charge_percent`、`nut_master_ups_runtime_minutes`、`nut_master_registered_slaves`、`nut_master_nodes{state}`、`nut_master_shutdowns_issued_total`、`nut_master_shutdown_acks_total{status}`、`nut_master_shutdown_active`、`nut_master_local_shutdown_phase{phase}`、`nut_master_register_attempts_total{result}`。
+
+## 一键安装 slave: GET /install/slave
+
+admin 接口 `GET /install/slave?node_id=<id>` 返回一段可直接 `bash` 执行的 shell。脚本会拉取与 master 同版本的 `install-online.sh`,自动填好 `--master-addr`(优先 `public_addr`,否则取请求 Host)、`--token`(`auth_tokens[0]`)、`--node-id`,并把 `<id>` 预先写入预期注册表(`expected`)。
+
+```bash
+TOKEN=$(sudo awk '/^admin_token:/ {print $2}' /etc/nut-server/master.yaml | tr -d '"')
+curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:9001/install/slave?node_id=db-01" \
+  | sudo bash
+```
+
+注意事项:
+- `node_id` 只接受字母数字 `-_.`,长度 ≤128;非法字符直接 `400`。
+- 同一个 `auth_tokens[0]` 会被烤进脚本,所以适合内网受信场景;混合多套 slave 信任域时建议每台用独立 token。
+- 没配 `public_addr` 时,如果通过反向代理 / 端口转发访问,Host header 可能不指向真实 master_addr — 建议显式配 `public_addr`。
