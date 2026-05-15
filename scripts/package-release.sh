@@ -41,10 +41,11 @@ copy_master_files() {
 copy_slave_files() {
   src_dir="$1"
   stage_dir="$2"
-  mkdir -p "$stage_dir/bin" "$stage_dir/configs" "$stage_dir/systemd" "$stage_dir/scripts"
+  mkdir -p "$stage_dir/bin" "$stage_dir/configs" "$stage_dir/systemd" "$stage_dir/scripts" "$stage_dir/sudoers"
   cp "$src_dir/nut-slave" "$stage_dir/bin/nut-slave"
   cp "$src_dir/configs/slave.example.yaml" "$stage_dir/configs/slave.example.yaml"
   cp "$src_dir/packaging/systemd/nut-slave.service" "$stage_dir/systemd/nut-slave.service"
+  cp "$src_dir/packaging/sudoers/nut-server-slave" "$stage_dir/sudoers/nut-server-slave"
   cp "$src_dir/scripts/install-slave.sh" "$stage_dir/scripts/install-slave.sh"
   cp "$src_dir/scripts/quick-install-slave.sh" "$stage_dir/scripts/quick-install-slave.sh"
   cp "$src_dir/scripts/install-online.sh" "$stage_dir/scripts/install-online.sh"

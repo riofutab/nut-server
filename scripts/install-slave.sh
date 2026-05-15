@@ -165,6 +165,7 @@ find_file() {
   for candidate in \
     "$ROOT_DIR/$target" \
     "$ROOT_DIR/systemd/$(basename "$target")" \
+    "$ROOT_DIR/sudoers/$(basename "$target")" \
     "$ROOT_DIR/dist/linux-amd64/$target" \
     "$ROOT_DIR/dist/linux-arm64/$target"
   do
@@ -178,6 +179,7 @@ find_file() {
 
 BIN_SOURCE=$(find_binary || true)
 SERVICE_SOURCE=$(find_file "packaging/systemd/nut-slave.service" || true)
+SUDOERS_SOURCE=$(find_file "packaging/sudoers/nut-server-slave" || true)
 
 if [ -z "$BIN_SOURCE" ]; then
   echo "nut-slave binary not found near script"
@@ -187,9 +189,22 @@ if [ -z "$SERVICE_SOURCE" ]; then
   echo "required service file not found near script"
   exit 1
 fi
+if [ -z "$SUDOERS_SOURCE" ]; then
+  echo "required sudoers file not found near script"
+  exit 1
+fi
 
-install -d /usr/local/bin /usr/local/lib/nut-server /etc/nut-server /var/lib/nut-server
+if ! getent passwd nut-server >/dev/null; then
+  useradd --system --home-dir /var/lib/nut-server --shell /usr/sbin/nologin nut-server
+fi
+
+install -d /usr/local/bin /usr/local/lib/nut-server
+install -d -o nut-server -g nut-server -m 0750 /etc/nut-server /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-slave
+install -o root -g root -m 0440 "$SUDOERS_SOURCE" /etc/sudoers.d/nut-server-slave
+if command -v visudo >/dev/null 2>&1; then
+  visudo -c -f /etc/sudoers.d/nut-server-slave >/dev/null
+fi
 
 CONFIG_PATH="/etc/nut-server/slave.yaml"
 if [ -f "$CONFIG_PATH" ]; then
@@ -211,6 +226,8 @@ tls:
   server_name: "$TLS_SERVER_NAME"
   insecure_skip_verify: $TLS_INSECURE_SKIP_VERIFY
 shutdown_command:
+  - "/usr/bin/sudo"
+  - "-n"
   - "/sbin/shutdown"
   - "-h"
   - "now"
@@ -228,6 +245,7 @@ EOF
   fi
   echo "generated $CONFIG_PATH for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 fi
+chown nut-server:nut-server "$CONFIG_PATH"
 chmod 0640 "$CONFIG_PATH"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-slave.service

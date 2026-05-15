@@ -10,7 +10,7 @@ build_target() {
   out_dir="$DIST_DIR/linux-$arch"
 
   rm -rf "$out_dir"
-  mkdir -p "$out_dir/configs" "$out_dir/packaging/systemd" "$out_dir/scripts"
+  mkdir -p "$out_dir/configs" "$out_dir/packaging/systemd" "$out_dir/packaging/sudoers" "$out_dir/scripts"
 
   (
     cd "$ROOT_DIR"
@@ -22,6 +22,7 @@ build_target() {
   cp "$ROOT_DIR/configs/slave.example.yaml" "$out_dir/configs/slave.example.yaml"
   cp "$ROOT_DIR/packaging/systemd/nut-master.service" "$out_dir/packaging/systemd/nut-master.service"
   cp "$ROOT_DIR/packaging/systemd/nut-slave.service" "$out_dir/packaging/systemd/nut-slave.service"
+  cp "$ROOT_DIR/packaging/sudoers/nut-server-slave" "$out_dir/packaging/sudoers/nut-server-slave"
   for script_name in \
     install-master.sh \
     install-slave.sh \

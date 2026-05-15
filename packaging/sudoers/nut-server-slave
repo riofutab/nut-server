@@ -1,0 +1,5 @@
+# Allow the nut-server user (running nut-slave) to execute the shutdown
+# command without a password. Required because the slave runs as a
+# non-root user since v0.2.0.
+Cmnd_Alias NUT_SHUTDOWN = /sbin/shutdown, /usr/sbin/shutdown, /sbin/poweroff, /usr/sbin/poweroff, /bin/systemctl poweroff, /usr/bin/systemctl poweroff
+nut-server ALL=(root) NOPASSWD: NUT_SHUTDOWN
