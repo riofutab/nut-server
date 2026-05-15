@@ -75,7 +75,16 @@ func recordShutdownAck(status string) {
 	if status == "" {
 		return
 	}
-	metricShutdownAcks.WithLabelValues(status).Inc()
+	switch status {
+	case protocol.ShutdownStatusAccepted,
+		protocol.ShutdownStatusExecuting,
+		protocol.ShutdownStatusExecuted,
+		protocol.ShutdownStatusFailed,
+		protocol.ShutdownStatusTimeout:
+		metricShutdownAcks.WithLabelValues(status).Inc()
+	default:
+		metricShutdownAcks.WithLabelValues("unknown").Inc()
+	}
 }
 
 func recordRegisterAttempt(result string) {

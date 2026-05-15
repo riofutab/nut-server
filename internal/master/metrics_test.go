@@ -60,6 +60,32 @@ func TestMetricsEndpointExposesExpectedFamilies(t *testing.T) {
 	}
 }
 
+func TestRecordShutdownAckBucketsUnknownStatuses(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		AdminToken: "secret",
+		SNMP:       config.SNMPConfig{Target: "10.0.0.1"},
+	})
+	recordShutdownAck("totally-bogus-value-from-rogue-slave")
+	recordShutdownAck("another-bogus-value")
+
+	reg := buildMasterRegistry(server)
+	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, `status="totally-bogus-value-from-rogue-slave"`) {
+		t.Fatalf("rogue status leaked into label set:\n%s", body)
+	}
+	if strings.Contains(body, `status="another-bogus-value"`) {
+		t.Fatalf("rogue status leaked into label set:\n%s", body)
+	}
+	if !strings.Contains(body, `nut_master_shutdown_acks_total{status="unknown"}`) {
+		t.Fatalf("expected unknown-status bucket to be present:\n%s", body)
+	}
+}
+
 func TestRecordShutdownAckIgnoresEmptyStatus(t *testing.T) {
 	server := NewServer(config.MasterConfig{
 		AdminToken: "secret",
