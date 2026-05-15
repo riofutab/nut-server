@@ -2,10 +2,12 @@ package slave
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"sync"
@@ -19,6 +21,8 @@ const (
 	registerAckReadDeadline = 10 * time.Second
 	writeDeadline           = 5 * time.Second
 	pingInterval            = 15 * time.Second
+	maxReconnectInterval    = 60 * time.Second
+	backoffJitterFactor     = 0.2
 )
 
 type Client struct {
@@ -56,12 +60,39 @@ func NewClient(cfg config.SlaveConfig) *Client {
 }
 
 func (c *Client) Run() error {
+	delay := c.cfg.ReconnectInterval.Duration
 	for {
-		if err := c.runOnce(); err != nil {
+		err := c.runOnce()
+		if err != nil {
 			log.Printf("slave connection ended: %v", err)
 		}
-		time.Sleep(c.cfg.ReconnectInterval.Duration)
+		if err == nil {
+			delay = c.cfg.ReconnectInterval.Duration
+		}
+		time.Sleep(jitterDuration(delay))
+		delay = nextBackoff(delay)
 	}
+}
+
+func nextBackoff(current time.Duration) time.Duration {
+	next := current * 2
+	if next <= 0 || next > maxReconnectInterval {
+		return maxReconnectInterval
+	}
+	return next
+}
+
+func jitterDuration(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	delta := float64(d) * backoffJitterFactor
+	offset := (rand.Float64()*2 - 1) * delta
+	result := time.Duration(float64(d) + offset)
+	if result < 0 {
+		return 0
+	}
+	return result
 }
 
 func (c *Client) dial() (net.Conn, error) {
@@ -103,7 +134,9 @@ func (c *Client) runOnce() error {
 	session.setReadDeadline(0)
 	log.Printf("registered to master %s as %s tags=%v tls=%t", c.cfg.MasterAddr, c.cfg.NodeID, c.cfg.Tags, c.cfg.TLS.EnabledForClient())
 
-	go c.runPingLoop(session)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.runPingLoop(ctx, session, conn)
 
 	for {
 		env, err := readEnvelope(session.reader)
@@ -218,13 +251,19 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 	return nil
 }
 
-func (c *Client) runPingLoop(session *connectionSession) {
+func (c *Client) runPingLoop(ctx context.Context, session *connectionSession, conn net.Conn) {
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if err := session.Send(protocol.TypePing, protocol.PingMessage{SentAt: time.Now().UTC()}); err != nil {
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if err := session.Send(protocol.TypePing, protocol.PingMessage{SentAt: time.Now().UTC()}); err != nil {
+				_ = conn.Close()
+				return
+			}
 		}
 	}
 }

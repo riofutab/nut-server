@@ -393,3 +393,37 @@ func readShutdownUpdate(t *testing.T, conn net.Conn, reader *bufio.Reader) proto
 	}
 	return update
 }
+
+func TestNextBackoffDoublesUntilCap(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{1 * time.Second, 2 * time.Second},
+		{5 * time.Second, 10 * time.Second},
+		{30 * time.Second, maxReconnectInterval},
+		{maxReconnectInterval, maxReconnectInterval},
+		{0, maxReconnectInterval},
+	}
+	for _, tc := range cases {
+		got := nextBackoff(tc.in)
+		if got != tc.want {
+			t.Errorf("nextBackoff(%s)=%s want %s", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestJitterDurationStaysWithinBand(t *testing.T) {
+	base := 10 * time.Second
+	low := time.Duration(float64(base) * (1 - backoffJitterFactor))
+	high := time.Duration(float64(base) * (1 + backoffJitterFactor))
+	for i := 0; i < 200; i++ {
+		got := jitterDuration(base)
+		if got < low || got > high {
+			t.Fatalf("jitterDuration out of band: got=%s low=%s high=%s", got, low, high)
+		}
+	}
+	if jitterDuration(0) != 0 {
+		t.Fatalf("jitterDuration(0) should be 0")
+	}
+}
