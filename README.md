@@ -10,7 +10,7 @@ UPS 读取默认按 UPS-MIB：
 - `charge_oid` 读取电池电量百分比
 - `runtime_minutes_oid` 读取剩余运行时间（分钟）
 
-仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本，以及 GitHub Actions 工作流：每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.2.0](https://github.com/riofutab/nut-server/releases/tag/v0.2.0)。
+仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本，以及 GitHub Actions 工作流：每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.3.0](https://github.com/riofutab/nut-server/releases/tag/v0.3.0)。
 
 ## 项目结构
 
