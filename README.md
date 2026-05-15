@@ -407,12 +407,18 @@ make run-slave      # go run ./cmd/nut-slave  -config config/slave.yaml
 make clean
 ```
 
+E2E 集成测试用 build tag 隔离,默认 `go test ./...` 不会跑;手动跑:
+
+```bash
+go test -tags e2e -count=1 ./internal/e2e/...
+```
+
+会在 loopback 上拉起真实的 master 和若干 slave,覆盖注册闭环、TLS、断线重连和 `/metrics`。CI 已经接入这一步。
+
 发布流程：在 master 上打 `v*` tag 并推到 origin，`.github/workflows/release.yml` 会自动安装 nfpm、生成所有产物、计算 SHA256SUMS 并创建 GitHub Release。
 
 ## 路线图
 
-- Prometheus metrics endpoint（master + slave）
-- e2e 集成测试（spin up master + 多个 slave 跑完一次真实关机）
 - 更完整的 SNMP 厂商兼容（APC / Eaton 等）
 - 多策略组合关机条件
 - master 一键 install slave endpoint（`/install/slave` 返回 curl-shell 一行装）
