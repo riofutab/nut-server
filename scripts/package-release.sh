@@ -82,7 +82,7 @@ package_master() {
 
   reset_stage "$stage_dir"
   copy_master_files "$src_dir" "$stage_dir"
-  copy_common_files "$stage_dir" "$ROOT_DIR/README-master.md"
+  copy_common_files "$stage_dir" "$ROOT_DIR/docs/master.md"
   write_archive "$archive" "$stage_dir"
 }
 
@@ -94,7 +94,7 @@ package_slave() {
 
   reset_stage "$stage_dir"
   copy_slave_files "$src_dir" "$stage_dir"
-  copy_common_files "$stage_dir" "$ROOT_DIR/README-slave.md"
+  copy_common_files "$stage_dir" "$ROOT_DIR/docs/slave.md"
   write_archive "$archive" "$stage_dir"
 }
 
@@ -113,7 +113,7 @@ package_upgrade() {
   cp "$src_dir/scripts/upgrade-common.sh" "$stage_dir/scripts/upgrade-common.sh"
   cp "$src_dir/scripts/upgrade-master.sh" "$stage_dir/scripts/upgrade-master.sh"
   cp "$src_dir/scripts/upgrade-slave.sh" "$stage_dir/scripts/upgrade-slave.sh"
-  copy_common_files "$stage_dir" "$ROOT_DIR/README-upgrade.md"
+  copy_common_files "$stage_dir" "$ROOT_DIR/docs/upgrade.md"
   write_archive "$archive" "$stage_dir"
 }
 
