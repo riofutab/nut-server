@@ -15,6 +15,12 @@ import (
 	"nut-server/internal/protocol"
 )
 
+const (
+	registerAckReadDeadline = 10 * time.Second
+	writeDeadline           = 5 * time.Second
+	pingInterval            = 15 * time.Second
+)
+
 type Client struct {
 	cfg               config.SlaveConfig
 	hostname          string
@@ -30,6 +36,7 @@ type shutdownExecution struct {
 }
 
 type connectionSession struct {
+	conn   net.Conn
 	reader *bufio.Reader
 	writer *bufio.Writer
 	mu     sync.Mutex
@@ -89,9 +96,11 @@ func (c *Client) runOnce() error {
 		return fmt.Errorf("send register: %w", err)
 	}
 
+	session.setReadDeadline(registerAckReadDeadline)
 	if err := c.expectRegisterAck(session.reader); err != nil {
 		return err
 	}
+	session.setReadDeadline(0)
 	log.Printf("registered to master %s as %s tags=%v tls=%t", c.cfg.MasterAddr, c.cfg.NodeID, c.cfg.Tags, c.cfg.TLS.EnabledForClient())
 
 	go c.runPingLoop(session)
@@ -210,7 +219,7 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 }
 
 func (c *Client) runPingLoop(session *connectionSession) {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -307,6 +316,7 @@ func decodePayload(data interface{}, dst interface{}) error {
 
 func newConnectionSession(conn net.Conn) *connectionSession {
 	return &connectionSession{
+		conn:   conn,
 		reader: bufio.NewReader(conn),
 		writer: bufio.NewWriter(conn),
 	}
@@ -316,9 +326,23 @@ func (s *connectionSession) Send(messageType string, payload interface{}) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.conn != nil {
+		_ = s.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+	}
 	envelope := protocol.Envelope{Type: messageType, Data: payload}
 	if err := json.NewEncoder(s.writer).Encode(envelope); err != nil {
 		return err
 	}
 	return s.writer.Flush()
+}
+
+func (s *connectionSession) setReadDeadline(timeout time.Duration) {
+	if s.conn == nil {
+		return
+	}
+	if timeout <= 0 {
+		_ = s.conn.SetReadDeadline(time.Time{})
+		return
+	}
+	_ = s.conn.SetReadDeadline(time.Now().Add(timeout))
 }

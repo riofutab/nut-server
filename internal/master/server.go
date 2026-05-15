@@ -171,6 +171,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = client.Close()
 	}()
 
+	_ = client.SetReadDeadline(HandshakeReadDeadline)
 	register, err := s.readRegister(client)
 	if err != nil {
 		log.Printf("register failed from %s: %v", conn.RemoteAddr(), err)
@@ -201,6 +202,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	for {
+		_ = client.SetReadDeadline(IdleReadDeadline)
 		env, err := client.ReadEnvelope()
 		if err != nil {
 			if err != io.EOF {

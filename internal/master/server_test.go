@@ -994,3 +994,39 @@ func (r *localShutdownRecorder) lastTrigger() string {
 	}
 	return r.triggers[len(r.triggers)-1]
 }
+
+func TestHandleConnDisconnectsIdleHandshake(t *testing.T) {
+	origHandshake := HandshakeReadDeadline
+	HandshakeReadDeadline = 100 * time.Millisecond
+	defer func() { HandshakeReadDeadline = origHandshake }()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	server := NewServer(config.MasterConfig{AuthTokens: []string{"t"}})
+
+	done := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		server.handleConn(conn)
+		close(done)
+	}()
+
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer clientConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleConn did not exit on idle handshake deadline")
+	}
+}
