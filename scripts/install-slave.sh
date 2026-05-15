@@ -166,10 +166,14 @@ if [ -z "$SERVICE_SOURCE" ]; then
   exit 1
 fi
 
-install -d /usr/local/bin /usr/local/lib/nut-server /etc/nut-server
+install -d /usr/local/bin /usr/local/lib/nut-server /etc/nut-server /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-slave
 
-cat > /etc/nut-server/slave.yaml <<EOF
+CONFIG_PATH="/etc/nut-server/slave.yaml"
+if [ -f "$CONFIG_PATH" ]; then
+  echo "config $CONFIG_PATH already exists, skipping generation"
+else
+  cat > "$CONFIG_PATH" <<EOF
 node_id: "$NODE_ID"
 master_addr: "$MASTER_ADDR"
 token: "$TOKEN"
@@ -190,20 +194,22 @@ shutdown_command:
   - "now"
 EOF
 
-if [ -n "$TAGS" ]; then
-  printf 'tags:\n' >> /etc/nut-server/slave.yaml
-  OLD_IFS=$IFS
-  IFS=,
-  set -- $TAGS
-  IFS=$OLD_IFS
-  for tag in "$@"; do
-    printf '  - "%s"\n' "$tag" >> /etc/nut-server/slave.yaml
-  done
+  if [ -n "$TAGS" ]; then
+    printf 'tags:\n' >> "$CONFIG_PATH"
+    OLD_IFS=$IFS
+    IFS=,
+    set -- $TAGS
+    IFS=$OLD_IFS
+    for tag in "$@"; do
+      printf '  - "%s"\n' "$tag" >> "$CONFIG_PATH"
+    done
+  fi
+  echo "generated $CONFIG_PATH for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 fi
+chmod 0640 "$CONFIG_PATH"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-slave.service
 systemctl daemon-reload
 
 echo "installed nut-slave"
-echo "generated /etc/nut-server/slave.yaml for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 echo "run: systemctl enable --now nut-slave"

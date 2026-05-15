@@ -33,3 +33,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist/release/*.tar.gz
+            dist/release/SHA256SUMS

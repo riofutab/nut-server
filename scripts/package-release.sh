@@ -124,4 +124,16 @@ do
   package_upgrade "$arch"
 done
 
-echo "release archives generated under $RELEASE_DIR"
+(
+  cd "$RELEASE_DIR"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum *.tar.gz > SHA256SUMS
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 *.tar.gz > SHA256SUMS
+  else
+    echo "neither sha256sum nor shasum available" >&2
+    exit 1
+  fi
+)
+
+echo "release archives and SHA256SUMS generated under $RELEASE_DIR"
