@@ -24,6 +24,7 @@ func TestLoadMasterConfigWithTLS(t *testing.T) {
 
 	content := strings.Join([]string{
 		"listen_addr: \"127.0.0.1:9000\"",
+		"admin_token: \"admin-secret\"",
 		"auth_tokens:",
 		"  - \"token-1\"",
 		"tls:",
@@ -66,6 +67,7 @@ func TestLoadMasterConfigRejectsIncompleteTLS(t *testing.T) {
 	configFile := filepath.Join(dir, "master.yaml")
 
 	content := strings.Join([]string{
+		"admin_token: \"admin-secret\"",
 		"auth_tokens:",
 		"  - \"token-1\"",
 		"tls:",

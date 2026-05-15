@@ -10,6 +10,7 @@ import (
 func TestLoadMasterConfigValidatesTLS(t *testing.T) {
 	configPath := writeConfigFile(t, `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:
@@ -59,6 +60,7 @@ tls:
 func TestLoadMasterConfigDisabledTLSIgnoresCertificateFields(t *testing.T) {
 	configPath := writeConfigFile(t, `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:
@@ -82,6 +84,7 @@ tls:
 func TestLoadMasterConfigDefaultsUPSLoggingSwitchOff(t *testing.T) {
 	configPath := writeConfigFile(t, `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:
@@ -100,6 +103,7 @@ snmp:
 func TestLoadMasterConfigParsesUPSLoggingSwitch(t *testing.T) {
 	configPath := writeConfigFile(t, `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 log_ups_status: true
@@ -119,6 +123,7 @@ snmp:
 func TestLoadMasterConfigDefaultsLocalShutdown(t *testing.T) {
 	configPath := writeConfigFile(t, `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:
@@ -156,6 +161,7 @@ func TestLoadMasterConfigValidatesLocalShutdown(t *testing.T) {
 			name: "enabled requires command",
 			content: `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:
@@ -170,6 +176,7 @@ local_shutdown:
 			name: "max_wait must be positive",
 			content: `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:
@@ -184,6 +191,7 @@ local_shutdown:
 			name: "emergency runtime must be positive",
 			content: `
 listen_addr: ":9000"
+admin_token: "admin-secret"
 auth_tokens:
   - "secret-token"
 snmp:

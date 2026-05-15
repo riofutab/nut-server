@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -993,6 +995,44 @@ func (r *localShutdownRecorder) lastTrigger() string {
 		return ""
 	}
 	return r.triggers[len(r.triggers)-1]
+}
+
+func TestRequireAdminTokenAcceptsValidBearer(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "secret"})
+	called := false
+	handler := server.requireAdminToken(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cases := []struct {
+		name       string
+		header     string
+		wantStatus int
+		wantCalled bool
+	}{
+		{"missing", "", http.StatusUnauthorized, false},
+		{"wrong scheme", "Basic foo", http.StatusUnauthorized, false},
+		{"wrong token", "Bearer nope", http.StatusUnauthorized, false},
+		{"correct token", "Bearer secret", http.StatusOK, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest(http.MethodGet, "/status", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status=%d want %d", rec.Code, tc.wantStatus)
+			}
+			if called != tc.wantCalled {
+				t.Fatalf("handler called=%v want %v", called, tc.wantCalled)
+			}
+		})
+	}
 }
 
 func TestHandleConnDisconnectsIdleHandshake(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 type MasterConfig struct {
 	ListenAddr      string         `yaml:"listen_addr"`
 	AdminListenAddr string         `yaml:"admin_listen_addr"`
+	AdminToken      string         `yaml:"admin_token"`
 	StateFile       string         `yaml:"state_file"`
 	AuthTokens      []string       `yaml:"auth_tokens"`
 	PollInterval    Duration       `yaml:"poll_interval"`
@@ -177,6 +178,9 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	}
 	if len(cfg.AuthTokens) == 0 {
 		return MasterConfig{}, fmt.Errorf("auth_tokens must not be empty")
+	}
+	if cfg.AdminToken == "" {
+		return MasterConfig{}, fmt.Errorf("admin_token must not be empty")
 	}
 	if cfg.PollInterval.Duration == 0 {
 		cfg.PollInterval.Duration = 10 * time.Second

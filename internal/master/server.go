@@ -1,6 +1,7 @@
 package master
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -106,11 +107,29 @@ func (s *Server) Run() error {
 
 func (s *Server) runAdminServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/commands/shutdown", s.handleManualShutdown)
-	mux.HandleFunc("/commands/reset", s.handleReset)
+	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
+	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
+	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))
 	if err := http.ListenAndServe(s.cfg.AdminListenAddr, mux); err != nil {
 		log.Printf("admin server stopped: %v", err)
+	}
+}
+
+func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
+	expected := []byte(s.cfg.AdminToken)
+	return func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(header, prefix) {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		candidate := []byte(strings.TrimPrefix(header, prefix))
+		if subtle.ConstantTimeCompare(candidate, expected) != 1 {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
 	}
 }
 
