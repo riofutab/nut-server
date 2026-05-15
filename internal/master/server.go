@@ -3,6 +3,7 @@ package master
 import (
 	"crypto/subtle"
 	"crypto/tls"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,9 +22,13 @@ import (
 	"nut-server/internal/security"
 )
 
+//go:embed web/index.html
+var webFS embed.FS
+
 type Server struct {
 	cfg                 config.MasterConfig
 	registry            *Registry
+	directory           *NodeDirectory
 	commandSeq          atomic.Uint64
 	shutdownIssued      atomic.Bool
 	commandMu           sync.Mutex
@@ -58,9 +63,10 @@ type localShutdownState struct {
 
 func NewServer(cfg config.MasterConfig) *Server {
 	server := &Server{
-		cfg:      cfg,
-		registry: NewRegistry(),
-		commands: make(map[string]*shutdownCommandState),
+		cfg:       cfg,
+		registry:  NewRegistry(),
+		directory: NewNodeDirectory(),
+		commands:  make(map[string]*shutdownCommandState),
 	}
 	server.localShutdownRunner = server.runLocalShutdownCommand
 	if cfg.SNMP.Target != "" {
@@ -107,12 +113,27 @@ func (s *Server) Run() error {
 
 func (s *Server) runAdminServer() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
 	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))
+	mux.HandleFunc("POST /nodes/expect", s.requireAdminToken(s.handleExpectNode))
+	mux.HandleFunc("DELETE /nodes/expect/{node_id}", s.requireAdminToken(s.handleUnsetExpected))
+	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
 	if err := http.ListenAndServe(s.cfg.AdminListenAddr, mux); err != nil {
 		log.Printf("admin server stopped: %v", err)
 	}
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	data, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
@@ -185,6 +206,57 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "reset complete"})
 }
 
+type expectNodeRequest struct {
+	NodeID   string   `json:"node_id"`
+	Hostname string   `json:"hostname,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+}
+
+func (s *Server) handleExpectNode(w http.ResponseWriter, r *http.Request) {
+	var req expectNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "decode body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	s.directory.SetExpected(req.NodeID, req.Hostname, req.Tags)
+	s.saveStateForDirectoryChange()
+	meta, _ := s.directory.Get(req.NodeID)
+	writeJSON(w, http.StatusOK, meta)
+}
+
+func (s *Server) handleUnsetExpected(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("node_id")
+	if nodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	s.directory.UnsetExpected(nodeID)
+	s.saveStateForDirectoryChange()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("node_id")
+	if nodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	switch s.directory.Delete(nodeID) {
+	case DeleteOK:
+		s.saveStateForDirectoryChange()
+		w.WriteHeader(http.StatusNoContent)
+	case DeleteNotFound:
+		http.Error(w, "node not found", http.StatusNotFound)
+	case DeleteRefusedSeen:
+		http.Error(w, "node has been seen; cannot delete", http.StatusConflict)
+	}
+}
+
 func (s *Server) handleConn(conn net.Conn) {
 	client := NewClient(conn)
 	defer func() {
@@ -213,6 +285,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	client.Tags = register.Tags
 	client.Touch()
 	s.registry.Set(client)
+	s.directory.Observe(register.NodeID, register.Hostname, register.Tags, time.Now().UTC())
+	s.saveStateForDirectoryChange()
 
 	if err := client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: true, Message: "registered"}); err != nil {
 		log.Printf("ack register to %s failed: %v", client.NodeID, err)
@@ -234,6 +308,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 		client.Touch()
+		s.directory.Touch(client.NodeID, time.Now().UTC())
 		if err := s.handleEnvelope(client, env); err != nil {
 			log.Printf("handle %s from %s failed: %v", env.Type, client.NodeID, err)
 		}
@@ -600,9 +675,13 @@ func (s *Server) Status() protocol.StatusResponse {
 	for _, client := range clients {
 		clientMap[client.NodeID] = client
 	}
+
+	directoryEntries := s.directory.List()
+	metaByID := make(map[string]NodeMeta, len(directoryEntries))
 	knownNodes := make(map[string]struct{})
-	for _, client := range clients {
-		knownNodes[client.NodeID] = struct{}{}
+	for _, meta := range directoryEntries {
+		metaByID[meta.NodeID] = meta
+		knownNodes[meta.NodeID] = struct{}{}
 	}
 	for _, command := range commandCopy {
 		for nodeID := range command.TargetNodes {
@@ -619,15 +698,40 @@ func (s *Server) Status() protocol.StatusResponse {
 	}
 	sort.Strings(nodeIDs)
 
+	now := time.Now().UTC()
+	offlineAfter := s.cfg.OfflineAfter.Duration
+
 	nodes := make([]protocol.NodeStatus, 0, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
-		node := protocol.NodeStatus{NodeID: nodeID}
+		node := protocol.NodeStatus{NodeID: nodeID, State: protocol.NodeStateNeverSeen}
+		meta, hasMeta := metaByID[nodeID]
+		if hasMeta {
+			node.Hostname = meta.Hostname
+			node.Tags = append([]string(nil), meta.Tags...)
+			node.Expected = meta.Expected
+			node.FirstSeen = meta.FirstSeen
+			node.LastSeen = meta.LastSeen
+		}
 		if client, ok := clientMap[nodeID]; ok {
-			lastSeen := client.LastSeen()
-			node.Hostname = client.Hostname
-			node.Tags = append([]string(nil), client.Tags...)
 			node.Connected = true
+			lastSeen := client.LastSeen()
 			node.LastSeen = &lastSeen
+			if node.Hostname == "" {
+				node.Hostname = client.Hostname
+			}
+			if node.Tags == nil {
+				node.Tags = append([]string(nil), client.Tags...)
+			}
+		}
+		switch {
+		case node.Connected:
+			node.State = protocol.NodeStateOnline
+		case node.LastSeen != nil && now.Sub(*node.LastSeen) <= offlineAfter:
+			node.State = protocol.NodeStateOnline
+		case node.LastSeen != nil:
+			node.State = protocol.NodeStateOffline
+		default:
+			node.State = protocol.NodeStateNeverSeen
 		}
 		if update, ok := latestNodeUpdate(nodeID, commandCopy); ok {
 			copied := update

@@ -97,10 +97,19 @@ type NodeStatus struct {
 	NodeID       string              `json:"node_id"`
 	Hostname     string              `json:"hostname"`
 	Tags         []string            `json:"tags,omitempty"`
+	State        string              `json:"state"`
+	Expected     bool                `json:"expected,omitempty"`
 	Connected    bool                `json:"connected"`
+	FirstSeen    *time.Time          `json:"first_seen,omitempty"`
 	LastSeen     *time.Time          `json:"last_seen,omitempty"`
 	LastShutdown *ShutdownAckMessage `json:"last_shutdown,omitempty"`
 }
+
+const (
+	NodeStateOnline    = "online"
+	NodeStateOffline   = "offline"
+	NodeStateNeverSeen = "never_seen"
+)
 
 type UPSStatusView struct {
 	Target         string     `json:"target"`

@@ -1070,3 +1070,139 @@ func TestHandleConnDisconnectsIdleHandshake(t *testing.T) {
 		t.Fatal("handleConn did not exit on idle handshake deadline")
 	}
 }
+
+func TestStatusComputesNodeStateFromDirectory(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		AuthTokens:   []string{"t"},
+		AdminToken:   "a",
+		OfflineAfter: config.Duration{Duration: 30 * time.Second},
+	})
+
+	now := time.Now().UTC()
+	server.directory.Observe("recent", "recent.lan", []string{"a"}, now.Add(-10*time.Second))
+	server.directory.Observe("stale", "stale.lan", []string{"b"}, now.Add(-5*time.Minute))
+	server.directory.SetExpected("waiting", "", []string{"c"})
+
+	got := server.Status()
+	states := make(map[string]string)
+	for _, n := range got.Nodes {
+		states[n.NodeID] = n.State
+	}
+
+	if states["recent"] != protocol.NodeStateOnline {
+		t.Errorf("recent state=%s want online", states["recent"])
+	}
+	if states["stale"] != protocol.NodeStateOffline {
+		t.Errorf("stale state=%s want offline", states["stale"])
+	}
+	if states["waiting"] != protocol.NodeStateNeverSeen {
+		t.Errorf("waiting state=%s want never_seen", states["waiting"])
+	}
+}
+
+func TestHandleExpectNodeCreatesAndReturnsMeta(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	body := bytes.NewBufferString(`{"node_id":"printer","hostname":"printer.lan","tags":["office"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/nodes/expect", body)
+	rec := httptest.NewRecorder()
+
+	server.handleExpectNode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	meta, ok := server.directory.Get("printer")
+	if !ok || !meta.Expected || meta.Hostname != "printer.lan" {
+		t.Fatalf("directory state wrong: %+v ok=%v", meta, ok)
+	}
+}
+
+func TestHandleExpectNodeRejectsEmptyID(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	body := bytes.NewBufferString(`{"node_id":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/nodes/expect", body)
+	rec := httptest.NewRecorder()
+
+	server.handleExpectNode(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleDeleteNodeRefusesSeenNode(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	server.directory.Observe("nas01", "nas01.lan", nil, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/nas01", nil)
+	req.SetPathValue("node_id", "nas01")
+	rec := httptest.NewRecorder()
+
+	server.handleDeleteNode(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusConflict)
+	}
+	if _, ok := server.directory.Get("nas01"); !ok {
+		t.Fatal("node should still exist after refused delete")
+	}
+}
+
+func TestHandleDeleteNodeAllowsNeverSeenNode(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	server.directory.SetExpected("printer", "", nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/printer", nil)
+	req.SetPathValue("node_id", "printer")
+	rec := httptest.NewRecorder()
+
+	server.handleDeleteNode(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusNoContent)
+	}
+	if _, ok := server.directory.Get("printer"); ok {
+		t.Fatal("node should be removed")
+	}
+}
+
+func TestHandleUnsetExpectedClearsFlagOnly(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	server.directory.Observe("nas01", "nas01.lan", nil, time.Now().UTC())
+	server.directory.SetExpected("nas01", "nas01.lan", nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/expect/nas01", nil)
+	req.SetPathValue("node_id", "nas01")
+	rec := httptest.NewRecorder()
+
+	server.handleUnsetExpected(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	meta, ok := server.directory.Get("nas01")
+	if !ok || meta.Expected {
+		t.Fatalf("Expected should be cleared, node retained: %+v", meta)
+	}
+	if meta.FirstSeen == nil {
+		t.Fatal("FirstSeen should be preserved")
+	}
+}
+
+func TestHandleIndexServesEmbeddedHTML(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleIndex(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("content-type=%q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>nut-master status</title>") {
+		t.Fatal("response does not contain expected title")
+	}
+	if !strings.Contains(body, "fetch('/status'") {
+		t.Fatal("response does not reference /status endpoint")
+	}
+}

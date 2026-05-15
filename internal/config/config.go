@@ -16,6 +16,7 @@ type MasterConfig struct {
 	AuthTokens      []string       `yaml:"auth_tokens"`
 	PollInterval    Duration       `yaml:"poll_interval"`
 	CommandTimeout  Duration       `yaml:"command_timeout"`
+	OfflineAfter    Duration       `yaml:"offline_after"`
 	DryRun          bool           `yaml:"dry_run"`
 	LogUPSStatus    bool           `yaml:"log_ups_status"`
 	TLS             TLSConfig      `yaml:"tls"`
@@ -187,6 +188,9 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	}
 	if cfg.CommandTimeout.Duration == 0 {
 		cfg.CommandTimeout.Duration = 30 * time.Second
+	}
+	if cfg.OfflineAfter.Duration == 0 {
+		cfg.OfflineAfter.Duration = 45 * time.Second
 	}
 	if cfg.LocalShutdown.Enabled && cfg.LocalShutdown.Command != nil && len(cfg.LocalShutdown.Command) == 0 {
 		return MasterConfig{}, fmt.Errorf("local_shutdown.command must not be empty when local_shutdown.enabled is true")
