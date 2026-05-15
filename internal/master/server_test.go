@@ -1099,3 +1099,88 @@ func TestStatusComputesNodeStateFromDirectory(t *testing.T) {
 		t.Errorf("waiting state=%s want never_seen", states["waiting"])
 	}
 }
+
+func TestHandleExpectNodeCreatesAndReturnsMeta(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	body := bytes.NewBufferString(`{"node_id":"printer","hostname":"printer.lan","tags":["office"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/nodes/expect", body)
+	rec := httptest.NewRecorder()
+
+	server.handleExpectNode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	meta, ok := server.directory.Get("printer")
+	if !ok || !meta.Expected || meta.Hostname != "printer.lan" {
+		t.Fatalf("directory state wrong: %+v ok=%v", meta, ok)
+	}
+}
+
+func TestHandleExpectNodeRejectsEmptyID(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	body := bytes.NewBufferString(`{"node_id":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/nodes/expect", body)
+	rec := httptest.NewRecorder()
+
+	server.handleExpectNode(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleDeleteNodeRefusesSeenNode(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	server.directory.Observe("nas01", "nas01.lan", nil, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/nas01", nil)
+	req.SetPathValue("node_id", "nas01")
+	rec := httptest.NewRecorder()
+
+	server.handleDeleteNode(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusConflict)
+	}
+	if _, ok := server.directory.Get("nas01"); !ok {
+		t.Fatal("node should still exist after refused delete")
+	}
+}
+
+func TestHandleDeleteNodeAllowsNeverSeenNode(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	server.directory.SetExpected("printer", "", nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/printer", nil)
+	req.SetPathValue("node_id", "printer")
+	rec := httptest.NewRecorder()
+
+	server.handleDeleteNode(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusNoContent)
+	}
+	if _, ok := server.directory.Get("printer"); ok {
+		t.Fatal("node should be removed")
+	}
+}
+
+func TestHandleUnsetExpectedClearsFlagOnly(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	server.directory.Observe("nas01", "nas01.lan", nil, time.Now().UTC())
+	server.directory.SetExpected("nas01", "nas01.lan", nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/expect/nas01", nil)
+	req.SetPathValue("node_id", "nas01")
+	rec := httptest.NewRecorder()
+
+	server.handleUnsetExpected(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	meta, ok := server.directory.Get("nas01")
+	if !ok || meta.Expected {
+		t.Fatalf("Expected should be cleared, node retained: %+v", meta)
+	}
+	if meta.FirstSeen == nil {
+		t.Fatal("FirstSeen should be preserved")
+	}
+}

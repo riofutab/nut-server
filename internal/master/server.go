@@ -112,6 +112,9 @@ func (s *Server) runAdminServer() {
 	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
 	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))
+	mux.HandleFunc("POST /nodes/expect", s.requireAdminToken(s.handleExpectNode))
+	mux.HandleFunc("DELETE /nodes/expect/{node_id}", s.requireAdminToken(s.handleUnsetExpected))
+	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
 	if err := http.ListenAndServe(s.cfg.AdminListenAddr, mux); err != nil {
 		log.Printf("admin server stopped: %v", err)
 	}
@@ -185,6 +188,57 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ResetActiveCommand()
 	writeJSON(w, http.StatusOK, map[string]string{"message": "reset complete"})
+}
+
+type expectNodeRequest struct {
+	NodeID   string   `json:"node_id"`
+	Hostname string   `json:"hostname,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+}
+
+func (s *Server) handleExpectNode(w http.ResponseWriter, r *http.Request) {
+	var req expectNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "decode body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	s.directory.SetExpected(req.NodeID, req.Hostname, req.Tags)
+	s.saveStateForDirectoryChange()
+	meta, _ := s.directory.Get(req.NodeID)
+	writeJSON(w, http.StatusOK, meta)
+}
+
+func (s *Server) handleUnsetExpected(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("node_id")
+	if nodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	s.directory.UnsetExpected(nodeID)
+	s.saveStateForDirectoryChange()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("node_id")
+	if nodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	switch s.directory.Delete(nodeID) {
+	case DeleteOK:
+		s.saveStateForDirectoryChange()
+		w.WriteHeader(http.StatusNoContent)
+	case DeleteNotFound:
+		http.Error(w, "node not found", http.StatusNotFound)
+	case DeleteRefusedSeen:
+		http.Error(w, "node has been seen; cannot delete", http.StatusConflict)
+	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
