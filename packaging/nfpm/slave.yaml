@@ -1,0 +1,45 @@
+name: nut-slave
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+section: admin
+priority: optional
+maintainer: nut-server maintainers <noreply@nut-server.local>
+description: |
+  Slave agent for nut-server. Maintains a persistent connection to a
+  master, reports liveness, and executes shutdown commands locally.
+vendor: nut-server
+homepage: https://github.com/riofutab/nut-server
+license: MIT
+
+contents:
+  - src: dist/linux-${BUILD_ARCH}/nut-slave
+    dst: /usr/local/bin/nut-slave
+    file_info:
+      mode: 0755
+
+  - src: packaging/systemd/nut-slave.service
+    dst: /lib/systemd/system/nut-slave.service
+    file_info:
+      mode: 0644
+
+  - src: configs/slave.example.yaml
+    dst: /etc/nut-server/slave.example.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - dst: /etc/nut-server
+    type: dir
+    file_info:
+      mode: 0755
+
+  - dst: /var/lib/nut-server
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: packaging/nfpm/slave.postinst.sh
+  preremove: packaging/nfpm/slave.prerm.sh
