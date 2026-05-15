@@ -216,6 +216,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	client.Touch()
 	s.registry.Set(client)
 	s.directory.Observe(register.NodeID, register.Hostname, register.Tags, time.Now().UTC())
+	s.saveStateForDirectoryChange()
 
 	if err := client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: true, Message: "registered"}); err != nil {
 		log.Printf("ack register to %s failed: %v", client.NodeID, err)

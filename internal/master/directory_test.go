@@ -96,6 +96,27 @@ func TestNodeDirectoryDeleteAllowsNeverSeenNode(t *testing.T) {
 	}
 }
 
+func TestNodeDirectorySnapshotAndReplaceRoundTrip(t *testing.T) {
+	d := NewNodeDirectory()
+	t1 := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	d.Observe("nas01", "nas01.lan", []string{"storage"}, t1)
+	d.SetExpected("printer", "", []string{"office"})
+
+	snap := d.snapshotForPersist()
+
+	d2 := NewNodeDirectory()
+	d2.replaceAll(snap)
+
+	got, ok := d2.Get("nas01")
+	if !ok || got.Hostname != "nas01.lan" || !got.FirstSeen.Equal(t1) {
+		t.Fatalf("nas01 not preserved: %+v ok=%v", got, ok)
+	}
+	pr, ok := d2.Get("printer")
+	if !ok || !pr.Expected || pr.FirstSeen != nil {
+		t.Fatalf("printer not preserved: %+v ok=%v", pr, ok)
+	}
+}
+
 func TestNodeDirectoryListReturnsDeepCopies(t *testing.T) {
 	d := NewNodeDirectory()
 	d.Observe("nas01", "nas01.lan", []string{"storage"}, time.Now().UTC())

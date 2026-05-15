@@ -16,6 +16,7 @@ type persistedState struct {
 	AutoShutdownLatched bool                             `json:"auto_shutdown_latched,omitempty"`
 	LocalShutdown       *localShutdownState              `json:"local_shutdown,omitempty"`
 	Commands            map[string]*shutdownCommandState `json:"commands,omitempty"`
+	Nodes               map[string]*NodeMeta             `json:"nodes,omitempty"`
 }
 
 func (s *Server) loadState() {
@@ -45,6 +46,15 @@ func (s *Server) loadState() {
 	s.commandSeq.Store(state.CommandSeq)
 	s.shutdownIssued.Store(state.ActiveCommand != "")
 	s.normalizeLoadedLocalShutdown()
+	if state.Nodes != nil {
+		s.directory.replaceAll(state.Nodes)
+	}
+}
+
+func (s *Server) saveStateForDirectoryChange() {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	s.saveStateLocked()
 }
 
 func (s *Server) saveStateLocked() {
@@ -57,6 +67,7 @@ func (s *Server) saveStateLocked() {
 		AutoShutdownLatched: s.autoShutdownLatched,
 		LocalShutdown:       persistedLocalShutdownState(s.localShutdown),
 		Commands:            s.commands,
+		Nodes:               s.directory.snapshotForPersist(),
 	}
 	content, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
