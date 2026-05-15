@@ -605,9 +605,13 @@ func (s *Server) Status() protocol.StatusResponse {
 	for _, client := range clients {
 		clientMap[client.NodeID] = client
 	}
+
+	directoryEntries := s.directory.List()
+	metaByID := make(map[string]NodeMeta, len(directoryEntries))
 	knownNodes := make(map[string]struct{})
-	for _, client := range clients {
-		knownNodes[client.NodeID] = struct{}{}
+	for _, meta := range directoryEntries {
+		metaByID[meta.NodeID] = meta
+		knownNodes[meta.NodeID] = struct{}{}
 	}
 	for _, command := range commandCopy {
 		for nodeID := range command.TargetNodes {
@@ -624,15 +628,40 @@ func (s *Server) Status() protocol.StatusResponse {
 	}
 	sort.Strings(nodeIDs)
 
+	now := time.Now().UTC()
+	offlineAfter := s.cfg.OfflineAfter.Duration
+
 	nodes := make([]protocol.NodeStatus, 0, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
-		node := protocol.NodeStatus{NodeID: nodeID}
+		node := protocol.NodeStatus{NodeID: nodeID, State: protocol.NodeStateNeverSeen}
+		meta, hasMeta := metaByID[nodeID]
+		if hasMeta {
+			node.Hostname = meta.Hostname
+			node.Tags = append([]string(nil), meta.Tags...)
+			node.Expected = meta.Expected
+			node.FirstSeen = meta.FirstSeen
+			node.LastSeen = meta.LastSeen
+		}
 		if client, ok := clientMap[nodeID]; ok {
-			lastSeen := client.LastSeen()
-			node.Hostname = client.Hostname
-			node.Tags = append([]string(nil), client.Tags...)
 			node.Connected = true
+			lastSeen := client.LastSeen()
 			node.LastSeen = &lastSeen
+			if node.Hostname == "" {
+				node.Hostname = client.Hostname
+			}
+			if node.Tags == nil {
+				node.Tags = append([]string(nil), client.Tags...)
+			}
+		}
+		switch {
+		case node.Connected:
+			node.State = protocol.NodeStateOnline
+		case node.LastSeen != nil && now.Sub(*node.LastSeen) <= offlineAfter:
+			node.State = protocol.NodeStateOnline
+		case node.LastSeen != nil:
+			node.State = protocol.NodeStateOffline
+		default:
+			node.State = protocol.NodeStateNeverSeen
 		}
 		if update, ok := latestNodeUpdate(nodeID, commandCopy); ok {
 			copied := update

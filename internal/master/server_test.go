@@ -1070,3 +1070,32 @@ func TestHandleConnDisconnectsIdleHandshake(t *testing.T) {
 		t.Fatal("handleConn did not exit on idle handshake deadline")
 	}
 }
+
+func TestStatusComputesNodeStateFromDirectory(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		AuthTokens:   []string{"t"},
+		AdminToken:   "a",
+		OfflineAfter: config.Duration{Duration: 30 * time.Second},
+	})
+
+	now := time.Now().UTC()
+	server.directory.Observe("recent", "recent.lan", []string{"a"}, now.Add(-10*time.Second))
+	server.directory.Observe("stale", "stale.lan", []string{"b"}, now.Add(-5*time.Minute))
+	server.directory.SetExpected("waiting", "", []string{"c"})
+
+	got := server.Status()
+	states := make(map[string]string)
+	for _, n := range got.Nodes {
+		states[n.NodeID] = n.State
+	}
+
+	if states["recent"] != protocol.NodeStateOnline {
+		t.Errorf("recent state=%s want online", states["recent"])
+	}
+	if states["stale"] != protocol.NodeStateOffline {
+		t.Errorf("stale state=%s want offline", states["stale"])
+	}
+	if states["waiting"] != protocol.NodeStateNeverSeen {
+		t.Errorf("waiting state=%s want never_seen", states["waiting"])
+	}
+}
