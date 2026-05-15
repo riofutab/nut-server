@@ -2,14 +2,15 @@
 
 一个基于 Go 的轻量 NUT 风格主从程序。
 
-`nut-master` 通过 SNMP 读取 UPS 状态；`nut-slave` 主动注册到 master；当满足关机策略时，master 向 slave 下发关机指令。当前版本已支持 `dry_run`，可先验证链路而不真正关机。
+`nut-master` 通过 SNMP 轮询 UPS 状态；`nut-slave` 主动注册到 master；当满足关机策略时，master 向所有匹配的 slave 下发关机指令。`dry_run` 模式可以先把整条链路跑一遍而不真正关机。
 
-当前默认按 UPS-MIB 方式读取：
-- `output_source_oid` 判断是否切到 battery
+UPS 读取默认按 UPS-MIB：
+
+- `output_source_oid` 判断是否切到电池供电
 - `charge_oid` 读取电池电量百分比
 - `runtime_minutes_oid` 读取剩余运行时间（分钟）
 
-仓库已包含：示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本、tar.gz 发布打包脚本，以及 GitHub Actions 构建 / tag 发布工作流。
+仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本，以及 GitHub Actions 工作流：每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.2.0](https://github.com/riofutab/nut-server/releases/tag/v0.2.0)。
 
 ## 项目结构
 
@@ -18,75 +19,83 @@ cmd/
   nut-master/          master 入口
   nut-slave/           slave 入口
 internal/
-  config/              配置加载
-  master/              master 核心逻辑
+  atomicfile/          状态文件原子写
+  config/              YAML 配置加载
+  logging/             slog 初始化
+  master/              master 核心逻辑（HTTP/连接/UPS/关机/状态）
+  master/web/          内嵌只读状态页（go:embed）
   slave/               slave 核心逻辑
   protocol/            TCP JSON 协议消息
-  security/            token 校验
+  security/            token 恒定时间比较
 configs/
   *.example.yaml       对外发布的示例配置
 config/
-  *.yaml               本地开发配置
-packaging/systemd/
-  *.service            systemd unit 文件
+  *.yaml               本地开发配置（不入库）
+packaging/
+  systemd/             systemd unit 文件
+  sudoers/             /etc/sudoers.d/nut-server-slave 模板
+  nfpm/                nfpm 配置 + postinst/prerm 脚本（生成 .deb/.rpm）
 scripts/
   build-linux.sh       linux amd64/arm64 构建脚本
-  install-master.sh    master 安装脚本
-  install-slave.sh     slave 安装脚本
+  package-release.sh   生成 .tar.gz / .deb / .rpm 发布产物
+  install-online.sh    在线安装入口（自动选 .deb/.rpm/.tar.gz）
+  install-master.sh    本地 master 安装脚本
+  install-slave.sh     本地 slave 安装脚本
+  upgrade-master.sh    升级 master 二进制，不改配置/状态
+  upgrade-slave.sh     升级 slave 二进制，不改配置/状态
 ```
 
 ## 功能
 
-- slave 主动注册到 master
-- token 鉴权
-- TCP 长连接 + JSON 行协议
-- SNMP 轮询 UPS 状态
-- shutdown 指令下发
-- shutdown 幂等处理
-- dry-run 验证模式
-- Linux systemd 部署支持
-- Linux amd64 / arm64 构建支持
+- 主从协议：TCP 长连接 + 行式 JSON 消息，token 注册，重连退避带抖动，握手/空闲读超时
+- SNMP 轮询 UPS：电池/电量/剩余分钟，可选 `log_ups_status` 写入 journal
+- 关机编排：支持按 node_id / tag 定向下发，按 `command_timeout` 强制超时，重启后从状态文件恢复
+- master 本机关机：远端节点完成后再关本机，支持 `max_wait` 兜底和 `emergency_runtime_minutes` 紧急阈值
+- 节点目录（v0.2.0）：master 记录每个节点的 first_seen / last_seen / tags / hostname，可登记"预期但还没上线"的节点
+- 内嵌只读状态页（v0.2.0）：`GET /` 直接看 UPS、节点表、活动命令；admin_token 仅放 sessionStorage
+- 管理 API（v0.2.0）：`/status`、`/commands/shutdown`、`/commands/reset`、`/nodes/expect`、`/nodes/{id}`；全部要求 `Authorization: Bearer <admin_token>`，token 用恒定时间比较
+- 优雅停机（v0.2.0）：SIGTERM/SIGINT 通过 `context.Context` 传到所有 goroutine，systemd stop 不再触发 timeout
+- 结构化日志（v0.2.0）：log/slog JSON handler 输出 `command_id` / `node_id` / `peer` 等命名字段
+- 部署（v0.2.0）：发布包含 `.deb` / `.rpm` / `.tar.gz`，`install-online.sh` 自动检测 apt/yum/dnf 选择安装方式
+- 沙箱：master 与 slave 都以非 root `nut-server` 用户运行；slave 通过受限 sudoers 调用 shutdown
+- TLS / mTLS：master 与 slave 都可选启用
+- Linux amd64 / arm64 同时构建
 
 ## 快速开始
 
 ### 1. 本地构建
 
 ```bash
-go build ./...
+go build -o nut-master ./cmd/nut-master
+go build -o nut-slave  ./cmd/nut-slave
 ```
+
+或者直接用 `go run`，看下一步。
 
 ### 2. 准备本地配置
 
-当前仓库已包含本地开发配置：
+仓库根目录的 `config/` 下已经有可直接使用的本地开发配置：
 
 - `config/master.yaml`
 - `config/slave.yaml`
 
-默认是 `dry_run: true`，便于先验证流程。
+默认都是 `dry_run: true`，可以先把链路跑通而不会真的关机。`config/` 目录被 `.gitignore` 忽略，可以放心写入 token 等本地参数。
 
 ### 3. 启动 master
-
-```bash
-./bin/nut-master -config config/master.yaml
-```
-
-或：
 
 ```bash
 go run ./cmd/nut-master -config config/master.yaml
 ```
 
+启动后，浏览器打开 `http://127.0.0.1:9001/`，按提示输入 `admin_token` 即可看到状态页。
+
 ### 4. 启动 slave
-
-```bash
-./bin/nut-slave -config config/slave.yaml
-```
-
-或：
 
 ```bash
 go run ./cmd/nut-slave -config config/slave.yaml
 ```
+
+slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 `online`。
 
 ## 配置说明
 
@@ -96,12 +105,14 @@ go run ./cmd/nut-slave -config config/slave.yaml
 
 关键字段：
 
-- `listen_addr`: master 监听地址
-- `admin_listen_addr`: 本地管理接口监听地址，提供状态查询、手动触发和 reset
-- `state_file`: master 本地状态文件，保存 active command 和节点回执，便于重启恢复
-- `auth_tokens`: 允许注册的 token 列表
+- `listen_addr`: master 监听地址（slave 注册端口）
+- `admin_listen_addr`: 管理 HTTP 监听地址，默认 `127.0.0.1:9001`，状态页与所有管理 API 都在这里
+- `admin_token`（**必填**，v0.2.0+）：管理接口的 Bearer token，可用 `openssl rand -hex 24` 生成
+- `state_file`: master 本地状态文件，保存 active command、节点回执和节点目录，便于重启恢复
+- `auth_tokens`: 允许 slave 注册的 token 列表（恒定时间比较）
 - `poll_interval`: SNMP 轮询间隔
 - `command_timeout`: shutdown 命令等待终态的最长时间，超时节点会记为 `timeout`
+- `offline_after`（v0.2.0+）：节点 `last_seen` 超过该窗口后在 `/status` 中显示为 `offline`，默认 `45s`
 - `dry_run`: 是否仅验证链路而不执行真实关机
 - `local_shutdown.enabled`: 是否让 master 在远端节点处理后再关闭本机
 - `local_shutdown.command`: master 本机关机时执行的命令，默认 `/sbin/shutdown -h now`
@@ -183,55 +194,36 @@ dry_run: true
 效果：
 
 - master 仍会广播 shutdown 指令
-- slave 仍会回传 shutdown ACK
-- slave 不会真正执行 `/sbin/shutdown -h now`
+- slave 仍会回传 shutdown ACK（`status: executed`，`message: dry-run shutdown simulated`）
+- slave 不会真正执行 `shutdown_command`
 
 ## 状态恢复
 
-- master 和 slave 都会把 shutdown 状态写入本地 `state_file`，用于进程重启或断线后的恢复
+- master 和 slave 都会把状态原子写入本地 `state_file`（临时文件 + fsync + rename，0600 权限）
+- master 持久化：`activeCommand`、所有 `commands` 的回执、节点目录（`NodeDirectory`，含 first_seen / last_seen / expected 标记）、`localShutdown` 当前阶段
+- slave 持久化：已处理的 `command_id` → ACK 映射，防止重启后重复执行
 - slave 如果在 `accepted` 或 `executing` 后断线，重连后会继续未完成的关机流程，而不是只回放旧 ACK
 - master 如果先把节点记为 `timeout`，后续又收到真实最终结果 `executed` / `failed`，会把状态改正为最终结果
 
 ## 构建 Linux 发布包
 
-执行：
+交叉编译两个架构的二进制：
 
 ```bash
-./scripts/build-linux.sh
+./scripts/build-linux.sh   # 或 make build-linux
 ```
 
-或：
+输出到 `dist/linux-amd64/` 与 `dist/linux-arm64/`，每个目录包含：`nut-master`、`nut-slave`、`configs/`、`packaging/systemd/`、`packaging/sudoers/`、`scripts/`。
+
+生成完整发布产物（tar.gz / .deb / .rpm / SHA256SUMS）：
 
 ```bash
-make build-linux
+./scripts/package-release.sh   # 或 make package
 ```
 
-输出目录：
+`.deb` / `.rpm` 需要本机有 `nfpm`（`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`），缺失时脚本会跳过这一步并照常生成 tar.gz。
 
-- `dist/linux-amd64/`
-- `dist/linux-arm64/`
-
-每个目录下会包含：
-
-- `nut-master`
-- `nut-slave`
-- `configs/`
-- `packaging/systemd/`
-- `scripts/`
-
-如果要生成 tar.gz 发布包：
-
-```bash
-./scripts/package-release.sh
-```
-
-或：
-
-```bash
-make package
-```
-
-推送 `v*` 格式 tag（例如 `v0.1.0`）后，GitHub Actions 会自动构建 tar.gz 并创建 GitHub Release。
+推送 `v*` 格式 tag 后，`.github/workflows/release.yml` 会在 GitHub Actions 上自动安装 nfpm、跑完整 `package-release.sh`、把所有产物（每架构 4 个 tar.gz + 2 个 .deb + 2 个 .rpm + SHA256SUMS，共 17 个）上传到 GitHub Release。
 
 ## systemd 部署
 
@@ -328,96 +320,9 @@ curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/nodes/expec
 
 只读状态页：浏览器打开 `http://<master>:9001/`，输入 admin_token 即可看到 UPS、节点列表（state / 主机名 / 标签 / 最近活跃时间）、当前活动命令；每 5 秒自动刷新。token 只放在 `sessionStorage`，关闭页面即失效。状态页是只读的，不提供关机/重置按钮。
 
-## 推到 GitHub 前建议
+## master 本机自关机（local_shutdown）
 
-建议保留入库内容：
-
-- `cmd/`
-- `internal/`
-- `configs/`
-- `packaging/`
-- `scripts/`
-- `README.md`
-- `.gitignore`
-- `go.mod`
-- `go.sum`
-
-不要提交：
-
-- `bin/`
-- `dist/`
-- `config/*.yaml`
-- `.claude/`
-
-## 后续可扩展方向
-
-- 管理接口鉴权
-- 更完整的 SNMP 厂商兼容
-- 多策略关机条件
-- metrics / health
-- 发布 tar.gz 打包与 GitHub Release 自动化
-
-## 开发辅助命令
-
-已提供 `Makefile`：
-
-```bash
-make build
-make build-linux
-make package
-make run-master
-make run-slave
-```
-
-## Release Packages
-
-Each tagged release publishes the following artifacts for both `amd64` and `arm64`:
-
-- **Linux packages (v0.2.0+)**：
-  - `nut-master_<version>_linux_<arch>.deb` / `.rpm`
-  - `nut-slave_<version>_linux_<arch>.deb` / `.rpm`
-- **tar.gz**（旧路径，仍然保留）：
-  - `nut-server_<version>_linux_<arch>.tar.gz`
-  - `nut-master_<version>_linux_<arch>.tar.gz`
-  - `nut-slave_<version>_linux_<arch>.tar.gz`
-  - `nut-server-upgrade_<version>_linux_<arch>.tar.gz`
-- `SHA256SUMS`：覆盖以上所有产物。`install-online.sh` 下载后自动校验。
-
-Quick install wrappers default to plain TCP for internal networks unless you pass normal `--tls-*` options:
-
-```bash
-sudo ./scripts/quick-install-master.sh --token your-token --snmp-target 10.0.0.31
-sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
-```
-
-Online install detects `apt` / `dnf` / `yum` and prefers the matching `.deb` / `.rpm`. Pass `--pkg deb|rpm|tar` to force a format, or pass role-script options after `--` to force the tar path so flags like `--token`, `--snmp-target`, `--admin-token` can prefill the config:
-
-```bash
-# Auto: package manager when available, tar.gz otherwise. master needs config edit afterwards.
-sudo ./scripts/install-online.sh --role master --version latest
-sudo ./scripts/install-online.sh --role slave  --version latest
-
-# Tar path with prefill
-sudo ./scripts/install-online.sh --role master --version latest -- \
-  --token your-token --admin-token "$(openssl rand -hex 24)" --snmp-target 10.0.0.31
-sudo ./scripts/install-online.sh --role slave  --version latest -- \
-  --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
-
-# Upgrade-only (always tar.gz — preserves config + state)
-sudo ./scripts/install-online.sh --role upgrade-master --version latest
-sudo ./scripts/install-online.sh --role upgrade-slave  --version latest
-```
-
-Upgrade scripts only replace binaries and systemd unit files. Existing config and state files stay in place:
-
-```bash
-sudo ./scripts/upgrade-master.sh
-sudo ./scripts/upgrade-slave.sh
-```
-
-## Master Local Shutdown
-
-If the master host itself also needs to shut down, but only after the remote nodes have had a chance to stop first, enable this in `/etc/nut-server/master.yaml`:
+如果 master 自己也需要在关电前关机，可以启用 `local_shutdown`，无需在 master 机器上再额外起一个 slave：
 
 ```yaml
 local_shutdown:
@@ -426,25 +331,56 @@ local_shutdown:
   emergency_runtime_minutes: 15
 ```
 
-After a shutdown event starts, the master will wait for remote nodes first. It will then shut down its own machine when all remote nodes finish, when `max_wait` expires, or immediately after a final rebroadcast if UPS runtime drops below the emergency threshold. You do not need to install a local slave on the master host for this.
+触发关机后，master 会先等远端节点都拿到终态，然后再关掉自己。三种触发方式：
 
-## UPS Poll Visibility
+- 远端全部完成（`remote_complete`）
+- 等待超过 `max_wait`（`wait_expired`）
+- UPS 剩余分钟 < `emergency_runtime_minutes`：先对仍在处理的远端补发一次关机指令，再立即关本机（`emergency_runtime`）
 
-To print successful UPS polls in the master service log, set this in `/etc/nut-server/master.yaml`:
+`/status` 的 `local_shutdown` 字段会显示当前在哪个阶段（`idle` / `waiting_remote` / `wait_expired` / `emergency` / `executing` / `completed` / `failed`）。
+
+## UPS 轮询可观测性
+
+要把每次成功的 SNMP 轮询写入 journal，可设置：
 
 ```yaml
 log_ups_status: true
 ```
 
-Then restart the master and watch the journal:
+然后重启 master：
 
 ```bash
 sudo systemctl restart nut-master
-sudo journalctl -u nut-master -f
+sudo journalctl -u nut-master -f -o json-pretty
 ```
 
-The master admin endpoint also returns the latest UPS status snapshot, including the last successful values and the most recent polling error:
+由于日志已经迁移到 slog JSON handler（v0.2.0+），journal 可以直接按字段过滤：
 
 ```bash
-curl http://127.0.0.1:9001/status
+sudo journalctl -u nut-master -o json | jq 'select(.msg == "ups status")'
 ```
+
+`/status` 端点也始终返回最新的 UPS 快照（`last_success_at` / `last_error_at` / 当前电量与剩余分钟）。
+
+## 开发辅助
+
+`Makefile` 提供了常用入口：
+
+```bash
+make build          # go build ./...
+make build-linux    # 交叉编译 amd64 + arm64 到 dist/linux-*/
+make package        # 生成 .tar.gz / .deb / .rpm（.deb/.rpm 需要安装 nfpm）
+make run-master     # go run ./cmd/nut-master -config config/master.yaml
+make run-slave      # go run ./cmd/nut-slave  -config config/slave.yaml
+make clean
+```
+
+发布流程：在 master 上打 `v*` tag 并推到 origin，`.github/workflows/release.yml` 会自动安装 nfpm、生成所有产物、计算 SHA256SUMS 并创建 GitHub Release。
+
+## 路线图
+
+- Prometheus metrics endpoint（master + slave）
+- e2e 集成测试（spin up master + 多个 slave 跑完一次真实关机）
+- 更完整的 SNMP 厂商兼容（APC / Eaton 等）
+- 多策略组合关机条件
+- master 一键 install slave endpoint（`/install/slave` 返回 curl-shell 一行装）
