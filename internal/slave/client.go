@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"os"
@@ -67,7 +67,7 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		err := c.runOnce(ctx)
 		if err != nil {
-			log.Printf("slave connection ended: %v", err)
+			slog.Warn("slave connection ended", "master", c.cfg.MasterAddr, "node_id", c.cfg.NodeID, "err", err)
 		}
 		if err == nil {
 			delay = c.cfg.ReconnectInterval.Duration
@@ -151,7 +151,11 @@ func (c *Client) runOnce(parentCtx context.Context) error {
 		return err
 	}
 	session.setReadDeadline(0)
-	log.Printf("registered to master %s as %s tags=%v tls=%t", c.cfg.MasterAddr, c.cfg.NodeID, c.cfg.Tags, c.cfg.TLS.EnabledForClient())
+	slog.Info("registered to master",
+		"master", c.cfg.MasterAddr,
+		"node_id", c.cfg.NodeID,
+		"tags", c.cfg.Tags,
+		"tls", c.cfg.TLS.EnabledForClient())
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -244,7 +248,10 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 
 func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *connectionSession) error {
 	if shutdown.DryRun || c.cfg.DryRun {
-		log.Printf("dry-run shutdown command received node_id=%s command_id=%s reason=%s", c.cfg.NodeID, shutdown.CommandID, shutdown.Reason)
+		slog.Info("dry-run shutdown received",
+			"command_id", shutdown.CommandID,
+			"node_id", c.cfg.NodeID,
+			"reason", shutdown.Reason)
 		executed := protocol.ShutdownAckMessage{
 			CommandID: shutdown.CommandID,
 			NodeID:    c.cfg.NodeID,
@@ -301,7 +308,7 @@ func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMes
 		Message:   "shutdown command completed",
 		AckedAt:   time.Now().UTC(),
 	}
-	if err := c.shutdown.Execute(log.Default()); err != nil {
+	if err := c.shutdown.Execute(slog.Default()); err != nil {
 		update.Status = protocol.ShutdownStatusFailed
 		update.Message = err.Error()
 		update.AckedAt = time.Now().UTC()
@@ -312,7 +319,11 @@ func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMes
 		return
 	}
 	if err := session.Send(protocol.TypeShutdownAck, update); err != nil {
-		log.Printf("report shutdown status failed node_id=%s command_id=%s status=%s: %v", c.cfg.NodeID, shutdown.CommandID, update.Status, err)
+		slog.Error("report shutdown status failed",
+			"command_id", shutdown.CommandID,
+			"node_id", c.cfg.NodeID,
+			"status", update.Status,
+			"err", err)
 	}
 }
 

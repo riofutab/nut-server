@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
@@ -24,14 +24,14 @@ func (s *Server) handleConn(conn net.Conn) {
 	_ = client.SetReadDeadline(HandshakeReadDeadline)
 	register, err := s.readRegister(client)
 	if err != nil {
-		log.Printf("register failed from %s: %v", conn.RemoteAddr(), err)
+		slog.Warn("register failed", "peer", conn.RemoteAddr().String(), "err", err)
 		_ = client.Send(protocol.TypeError, protocol.ErrorMessage{Message: err.Error()})
 		return
 	}
 
 	if !security.ValidateToken(s.cfg.AuthTokens, register.Token) {
 		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: "invalid token"})
-		log.Printf("reject slave %s: invalid token", register.NodeID)
+		slog.Warn("reject slave: invalid token", "node_id", register.NodeID, "peer", conn.RemoteAddr().String())
 		return
 	}
 
@@ -44,12 +44,12 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.saveStateForDirectoryChange()
 
 	if err := client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: true, Message: "registered"}); err != nil {
-		log.Printf("ack register to %s failed: %v", client.NodeID, err)
+		slog.Error("ack register failed", "node_id", client.NodeID, "err", err)
 		return
 	}
-	log.Printf("slave registered node_id=%s hostname=%s tags=%v", client.NodeID, client.Hostname, client.Tags)
+	slog.Info("slave registered", "node_id", client.NodeID, "hostname", client.Hostname, "tags", client.Tags)
 	if err := s.replayPendingShutdown(client); err != nil {
-		log.Printf("replay pending shutdown to %s failed: %v", client.NodeID, err)
+		slog.Error("replay pending shutdown failed", "node_id", client.NodeID, "err", err)
 		return
 	}
 
@@ -58,14 +58,14 @@ func (s *Server) handleConn(conn net.Conn) {
 		env, err := client.ReadEnvelope()
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("read from %s failed: %v", client.NodeID, err)
+				slog.Warn("read from slave failed", "node_id", client.NodeID, "err", err)
 			}
 			return
 		}
 		client.Touch()
 		s.directory.Touch(client.NodeID, time.Now().UTC())
 		if err := s.handleEnvelope(client, env); err != nil {
-			log.Printf("handle %s from %s failed: %v", env.Type, client.NodeID, err)
+			slog.Error("handle envelope failed", "node_id", client.NodeID, "type", env.Type, "err", err)
 		}
 	}
 }
@@ -110,7 +110,11 @@ func (s *Server) handleEnvelope(client *Client, env protocol.Envelope) error {
 			return err
 		}
 		s.recordShutdownUpdate(ack)
-		log.Printf("shutdown update node_id=%s command_id=%s status=%s message=%s", ack.NodeID, ack.CommandID, ack.Status, ack.Message)
+		slog.Info("shutdown update",
+			"command_id", ack.CommandID,
+			"node_id", ack.NodeID,
+			"status", ack.Status,
+			"message", ack.Message)
 		return nil
 	default:
 		return fmt.Errorf("unsupported message type %s", env.Type)

@@ -3,7 +3,7 @@ package master
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"time"
 
@@ -80,12 +80,14 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 	s.commandMu.Unlock()
 
 	if len(replayNodes) > 0 {
-		log.Printf("local shutdown emergency replay command_id=%s nodes=%d", replay.CommandID, len(replayNodes))
+		slog.Warn("local shutdown emergency replay",
+			"command_id", replay.CommandID,
+			"nodes", len(replayNodes))
 		s.replayShutdownToNodes(replay, replayNodes)
 	}
 	if commandID != "" {
 		if trigger == protocol.LocalShutdownTriggerWaitExpired {
-			log.Printf("local shutdown wait expired command_id=%s", commandID)
+			slog.Warn("local shutdown wait expired", "command_id", commandID)
 		}
 		s.beginLocalShutdownExecution(commandID, trigger)
 	}
@@ -105,7 +107,7 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	s.saveStateLocked()
 	s.commandMu.Unlock()
 
-	log.Printf("local shutdown starting command_id=%s trigger=%s", commandID, trigger)
+	slog.Info("local shutdown starting", "command_id", commandID, "trigger", trigger)
 	err := s.localShutdownRunner(command, trigger)
 
 	s.commandMu.Lock()
@@ -116,7 +118,10 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	if err != nil {
 		s.localShutdown.Phase = protocol.LocalShutdownPhaseFailed
 		s.localShutdown.LastError = err.Error()
-		log.Printf("local shutdown failed command_id=%s trigger=%s err=%v", commandID, trigger, err)
+		slog.Error("local shutdown failed",
+			"command_id", commandID,
+			"trigger", trigger,
+			"err", err)
 	} else {
 		s.localShutdown.Phase = protocol.LocalShutdownPhaseCompleted
 		s.localShutdown.LastError = ""
@@ -129,7 +134,7 @@ func (s *Server) runLocalShutdownCommand(command []string, trigger string) error
 		return fmt.Errorf("local shutdown command is empty")
 	}
 	if s.cfg.DryRun {
-		log.Printf("dry-run local shutdown trigger=%s command=%v", trigger, command)
+		slog.Info("dry-run local shutdown", "trigger", trigger, "command", command)
 		return nil
 	}
 	return exec.Command(command[0], command[1:]...).Run()
@@ -142,7 +147,10 @@ func (s *Server) replayShutdownToNodes(message protocol.ShutdownMessage, nodeIDs
 		}
 		go func(client *Client) {
 			if err := client.Send(protocol.TypeShutdown, message); err != nil {
-				log.Printf("rebroadcast shutdown to %s failed: %v", client.NodeID, err)
+				slog.Error("rebroadcast shutdown failed",
+					"command_id", message.CommandID,
+					"node_id", client.NodeID,
+					"err", err)
 			}
 		}(client)
 	}

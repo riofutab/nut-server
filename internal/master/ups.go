@@ -2,7 +2,7 @@ package master
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"nut-server/internal/protocol"
@@ -14,7 +14,7 @@ func (s *Server) runPollingLoop(ctx context.Context) {
 
 	for {
 		if err := s.evaluateUPS(); err != nil {
-			log.Printf("poll UPS failed: %v", err)
+			slog.Error("poll UPS failed", "target", s.cfg.SNMP.Target, "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -82,13 +82,11 @@ func (s *Server) recordUPSSuccess(status UPSStatus, polledAt time.Time) {
 	s.upsStatus.LastErrorAt = nil
 
 	if s.cfg.LogUPSStatus {
-		log.Printf(
-			"ups status target=%s on_battery=%t charge=%d runtime_minutes=%d",
-			s.cfg.SNMP.Target,
-			status.OnBattery,
-			status.BatteryCharge,
-			status.RuntimeMinutes,
-		)
+		slog.Info("ups status",
+			"target", s.cfg.SNMP.Target,
+			"on_battery", status.OnBattery,
+			"charge", status.BatteryCharge,
+			"runtime_minutes", status.RuntimeMinutes)
 	}
 }
 

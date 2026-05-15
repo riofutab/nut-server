@@ -2,14 +2,17 @@ package logging
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"os"
 )
 
-func New(service string) *log.Logger {
-	return log.New(os.Stdout, service+" ", log.LstdFlags|log.Lmicroseconds)
+func Init(service string) *slog.Logger {
+	return InitWithWriter(service, os.Stdout)
 }
 
-func NewWithWriter(service string, writer io.Writer) *log.Logger {
-	return log.New(writer, service+" ", log.LstdFlags|log.Lmicroseconds)
+func InitWithWriter(service string, w io.Writer) *slog.Logger {
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})
+	logger := slog.New(handler).With("service", service)
+	slog.SetDefault(logger)
+	return logger
 }

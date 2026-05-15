@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -332,7 +332,7 @@ type fakeShutdownExecutor struct {
 	err   error
 }
 
-func (f *fakeShutdownExecutor) Execute(_ *log.Logger) error {
+func (f *fakeShutdownExecutor) Execute(_ *slog.Logger) error {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -352,7 +352,7 @@ type blockingShutdownExecutor struct {
 	once    sync.Once
 }
 
-func (b *blockingShutdownExecutor) Execute(_ *log.Logger) error {
+func (b *blockingShutdownExecutor) Execute(_ *slog.Logger) error {
 	b.once.Do(func() {
 		close(b.started)
 	})

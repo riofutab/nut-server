@@ -2,7 +2,7 @@ package master
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -90,13 +90,18 @@ func (s *Server) triggerShutdown(request protocol.ShutdownRequest, auto bool) (p
 	s.commandMu.Unlock()
 
 	if s.cfg.LocalShutdown.Enabled {
-		log.Printf("local shutdown waiting command_id=%s deadline=%s", message.CommandID, message.IssuedAt.Add(s.cfg.LocalShutdown.MaxWait.Duration).Format(time.RFC3339))
+		slog.Info("local shutdown waiting",
+			"command_id", message.CommandID,
+			"deadline", message.IssuedAt.Add(s.cfg.LocalShutdown.MaxWait.Duration).Format(time.RFC3339))
 	}
 
 	var firstErr error
 	for _, client := range targets {
 		if err := client.Send(protocol.TypeShutdown, message); err != nil {
-			log.Printf("send shutdown to %s failed: %v", client.NodeID, err)
+			slog.Error("send shutdown failed",
+				"command_id", message.CommandID,
+				"node_id", client.NodeID,
+				"err", err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -229,7 +234,9 @@ func (s *Server) recordShutdownUpdate(update protocol.ShutdownAckMessage) {
 	s.commandMu.Unlock()
 
 	if startLocalShutdown {
-		log.Printf("local shutdown triggered by remote completion command_id=%s", update.CommandID)
+		slog.Info("local shutdown triggered",
+			"command_id", update.CommandID,
+			"trigger", protocol.LocalShutdownTriggerRemoteComplete)
 		s.beginLocalShutdownExecution(update.CommandID, protocol.LocalShutdownTriggerRemoteComplete)
 	}
 }

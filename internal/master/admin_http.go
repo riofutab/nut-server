@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -32,7 +32,7 @@ func (s *Server) runAdminServer(ctx context.Context) {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Printf("admin server stopped: %v", err)
+		slog.Error("admin server stopped", "err", err)
 	}
 }
 
@@ -162,6 +162,6 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("encode response failed: %v", err)
+		slog.Error("encode response failed", "err", err)
 	}
 }

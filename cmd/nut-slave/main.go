@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -16,19 +17,22 @@ func main() {
 	configPath := flag.String("config", "config/slave.yaml", "path to slave config")
 	flag.Parse()
 
+	logger := logging.Init("nut-slave")
+
 	cfg, err := config.LoadSlaveConfig(*configPath)
 	if err != nil {
-		log.Fatalf("load slave config: %v", err)
+		logger.Error("load slave config failed", "path", *configPath, "err", err)
+		os.Exit(1)
 	}
 
-	logger := logging.New("nut-slave")
-	logger.Printf("starting with config %s dry_run=%t", *configPath, cfg.DryRun)
+	logger.Info("starting", "config", *configPath, "dry_run", cfg.DryRun)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	client := slave.NewClient(cfg)
 	if err := client.Run(ctx); err != nil {
-		logger.Fatalf("run slave: %v", err)
+		slog.Error("run slave failed", "err", err)
+		os.Exit(1)
 	}
 }

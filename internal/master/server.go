@@ -6,7 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -91,7 +91,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	defer listener.Close()
 
-	log.Printf("master listening on %s tls=%t mTLS=%t", s.cfg.ListenAddr, s.cfg.TLS.EnabledForServer(), s.cfg.TLS.RequireClientCert)
+	slog.Info("master listening",
+		"addr", s.cfg.ListenAddr,
+		"tls", s.cfg.TLS.EnabledForServer(),
+		"mtls", s.cfg.TLS.RequireClientCert)
 
 	go func() {
 		<-ctx.Done()
@@ -108,7 +111,7 @@ func (s *Server) Run(ctx context.Context) error {
 		conn, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				log.Printf("master shutting down: %v", ctx.Err())
+				slog.Info("master shutting down", "reason", ctx.Err())
 				wg.Wait()
 				return nil
 			}

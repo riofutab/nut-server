@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -903,8 +903,10 @@ func TestRecordUPSSuccessLogsWhenEnabled(t *testing.T) {
 	}, time.Now().UTC())
 
 	output := logOutput.String()
-	if !strings.Contains(output, "ups status target=10.0.0.31 on_battery=false charge=95 runtime_minutes=42") {
-		t.Fatalf("expected UPS success log, got %q", output)
+	for _, want := range []string{`msg="ups status"`, "target=10.0.0.31", "on_battery=false", "charge=95", "runtime_minutes=42"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected UPS success log to contain %q, got %q", want, output)
+		}
 	}
 }
 
@@ -964,16 +966,10 @@ func decodePayloadForTest(t *testing.T, data interface{}, dst interface{}) {
 func captureStandardLog(t *testing.T) (*bytes.Buffer, func()) {
 	t.Helper()
 	var output bytes.Buffer
-	previousWriter := log.Writer()
-	previousFlags := log.Flags()
-	previousPrefix := log.Prefix()
-	log.SetOutput(&output)
-	log.SetFlags(0)
-	log.SetPrefix("")
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	return &output, func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-		log.SetPrefix(previousPrefix)
+		slog.SetDefault(previous)
 	}
 }
 
