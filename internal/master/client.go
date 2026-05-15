@@ -12,6 +12,12 @@ import (
 	"nut-server/internal/protocol"
 )
 
+var (
+	HandshakeReadDeadline = 5 * time.Second
+	IdleReadDeadline      = 45 * time.Second
+	WriteDeadline         = 5 * time.Second
+)
+
 type Client struct {
 	NodeID   string
 	Hostname string
@@ -37,6 +43,7 @@ func (c *Client) Send(messageType string, payload interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(WriteDeadline))
 	envelope := protocol.Envelope{Type: messageType, Data: payload}
 	if err := json.NewEncoder(c.writer).Encode(envelope); err != nil {
 		return fmt.Errorf("encode %s to %s: %w", messageType, c.NodeID, err)
@@ -45,6 +52,13 @@ func (c *Client) Send(messageType string, payload interface{}) error {
 		return fmt.Errorf("flush %s to %s: %w", messageType, c.NodeID, err)
 	}
 	return nil
+}
+
+func (c *Client) SetReadDeadline(timeout time.Duration) error {
+	if timeout <= 0 {
+		return c.Conn.SetReadDeadline(time.Time{})
+	}
+	return c.Conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
 func (c *Client) ReadEnvelope() (protocol.Envelope, error) {
@@ -75,6 +89,3 @@ func (c *Client) Close() error {
 	return c.Conn.Close()
 }
 
-func (c *Client) SetDeadline(timeout time.Duration) error {
-	return c.Conn.SetDeadline(time.Now().Add(timeout))
-}

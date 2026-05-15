@@ -5,8 +5,8 @@ import (
 	"errors"
 	"log"
 	"os"
-	"path/filepath"
 
+	"nut-server/internal/atomicfile"
 	"nut-server/internal/protocol"
 )
 
@@ -63,11 +63,7 @@ func (s *Server) saveStateLocked() {
 		log.Printf("encode master state failed: %v", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(s.cfg.StateFile), 0o755); err != nil {
-		log.Printf("create master state dir failed: %v", err)
-		return
-	}
-	if err := os.WriteFile(s.cfg.StateFile, content, 0o644); err != nil {
+	if err := atomicfile.WriteFile(s.cfg.StateFile, content, 0o600); err != nil {
 		log.Printf("write master state failed: %v", err)
 	}
 }

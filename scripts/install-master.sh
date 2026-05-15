@@ -6,6 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 LISTEN_ADDR=":9000"
 ADMIN_LISTEN_ADDR="127.0.0.1:9001"
+ADMIN_TOKEN=""
 TOKEN=""
 SNMP_TARGET=""
 SNMP_COMMUNITY="public"
@@ -18,7 +19,7 @@ TLS_DISABLED="false"
 
 usage() {
   cat <<'EOF'
-usage: install-master.sh --token <token> --snmp-target <host> [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
+usage: install-master.sh --token <token> --snmp-target <host> [--admin-token <token>] [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
 
 TLS:
   --disable-tls                  force plain TCP and ignore all TLS certificate settings
@@ -41,6 +42,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --token)
       TOKEN="$2"
+      shift 2
+      ;;
+    --admin-token)
+      ADMIN_TOKEN="$2"
       shift 2
       ;;
     --snmp-target)
@@ -93,6 +98,25 @@ if [ -z "$TOKEN" ] || [ -z "$SNMP_TARGET" ]; then
   usage
   exit 1
 fi
+
+reject_unsafe() {
+  name="$1"
+  value="$2"
+  allowed="$3"
+  case "$value" in
+    *[!${allowed}]*)
+      echo "$name contains characters outside [$allowed]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+reject_unsafe "--token" "$TOKEN" 'a-zA-Z0-9_.\-'
+reject_unsafe "--admin-token" "$ADMIN_TOKEN" 'a-zA-Z0-9_.\-'
+reject_unsafe "--snmp-target" "$SNMP_TARGET" 'a-zA-Z0-9_.\-:'
+reject_unsafe "--snmp-community" "$SNMP_COMMUNITY" 'a-zA-Z0-9_.\-'
+reject_unsafe "--listen-addr" "$LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
+reject_unsafe "--admin-listen-addr" "$ADMIN_LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
 
 if [ "$TLS_DISABLED" = "true" ]; then
   TLS_ENABLED="false"
@@ -167,12 +191,45 @@ if [ -z "$SERVICE_SOURCE" ]; then
   exit 1
 fi
 
-install -d /usr/local/bin /usr/local/lib/nut-server /etc/nut-server
+if ! getent passwd nut-server >/dev/null; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin nut-server
+fi
+
+install -d /usr/local/bin /usr/local/lib/nut-server
+for dir in /etc/nut-server /var/lib/nut-server; do
+  if [ -L "$dir" ]; then
+    echo "$dir must not be a symbolic link" >&2
+    exit 1
+  fi
+done
+install -d -o nut-server -g nut-server -m 0750 /etc/nut-server
+install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
+chown -R nut-server:nut-server /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-master
 
-cat > /etc/nut-server/master.yaml <<EOF
+random_token() {
+  head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32
+}
+
+CONFIG_PATH="/etc/nut-server/master.yaml"
+if [ -f "$CONFIG_PATH" ]; then
+  echo "config $CONFIG_PATH already exists, skipping generation"
+  if ! grep -q '^admin_token:' "$CONFIG_PATH"; then
+    if [ -z "$ADMIN_TOKEN" ]; then
+      ADMIN_TOKEN=$(random_token)
+    fi
+    printf '\nadmin_token: "%s"\n' "$ADMIN_TOKEN" >> "$CONFIG_PATH"
+    echo "added admin_token to existing master.yaml"
+  fi
+else
+  if [ -z "$ADMIN_TOKEN" ]; then
+    ADMIN_TOKEN=$(random_token)
+    echo "generated admin_token; see $CONFIG_PATH"
+  fi
+  cat > "$CONFIG_PATH" <<EOF
 listen_addr: "$LISTEN_ADDR"
 admin_listen_addr: "$ADMIN_LISTEN_ADDR"
+admin_token: "$ADMIN_TOKEN"
 state_file: "/var/lib/nut-server/master-state.json"
 auth_tokens:
   - "$TOKEN"
@@ -202,10 +259,13 @@ snmp:
   charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
   runtime_minutes_oid: ".1.3.6.1.2.1.33.1.2.3.0"
 EOF
+  echo "generated $CONFIG_PATH for listen_addr=$LISTEN_ADDR snmp_target=$SNMP_TARGET"
+fi
+chown root:nut-server "$CONFIG_PATH"
+chmod 0640 "$CONFIG_PATH"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-master.service
 systemctl daemon-reload
 
 echo "installed nut-master"
-echo "generated /etc/nut-server/master.yaml for listen_addr=$LISTEN_ADDR snmp_target=$SNMP_TARGET"
 echo "run: systemctl enable --now nut-master"

@@ -96,6 +96,28 @@ if [ -z "$NODE_ID" ] || [ -z "$MASTER_ADDR" ] || [ -z "$TOKEN" ]; then
   exit 1
 fi
 
+reject_unsafe() {
+  name="$1"
+  value="$2"
+  allowed="$3"
+  case "$value" in
+    *[!${allowed}]*)
+      echo "$name contains characters outside [$allowed]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+reject_unsafe "--node-id" "$NODE_ID" 'a-zA-Z0-9_.\-'
+reject_unsafe "--master-addr" "$MASTER_ADDR" 'a-zA-Z0-9_.\-:'
+reject_unsafe "--token" "$TOKEN" 'a-zA-Z0-9_.\-'
+if [ -n "$TAGS" ]; then
+  reject_unsafe "--tags" "$TAGS" 'a-zA-Z0-9_.,\-'
+fi
+if [ -n "$TLS_SERVER_NAME" ]; then
+  reject_unsafe "--tls-server-name" "$TLS_SERVER_NAME" 'a-zA-Z0-9_.\-'
+fi
+
 if [ "$TLS_DISABLED" = "true" ]; then
   TLS_ENABLED="false"
   TLS_CERT_FILE=""
@@ -166,10 +188,14 @@ if [ -z "$SERVICE_SOURCE" ]; then
   exit 1
 fi
 
-install -d /usr/local/bin /usr/local/lib/nut-server /etc/nut-server
+install -d /usr/local/bin /usr/local/lib/nut-server /etc/nut-server /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-slave
 
-cat > /etc/nut-server/slave.yaml <<EOF
+CONFIG_PATH="/etc/nut-server/slave.yaml"
+if [ -f "$CONFIG_PATH" ]; then
+  echo "config $CONFIG_PATH already exists, skipping generation"
+else
+  cat > "$CONFIG_PATH" <<EOF
 node_id: "$NODE_ID"
 master_addr: "$MASTER_ADDR"
 token: "$TOKEN"
@@ -190,20 +216,22 @@ shutdown_command:
   - "now"
 EOF
 
-if [ -n "$TAGS" ]; then
-  printf 'tags:\n' >> /etc/nut-server/slave.yaml
-  OLD_IFS=$IFS
-  IFS=,
-  set -- $TAGS
-  IFS=$OLD_IFS
-  for tag in "$@"; do
-    printf '  - "%s"\n' "$tag" >> /etc/nut-server/slave.yaml
-  done
+  if [ -n "$TAGS" ]; then
+    printf 'tags:\n' >> "$CONFIG_PATH"
+    OLD_IFS=$IFS
+    IFS=,
+    set -- $TAGS
+    IFS=$OLD_IFS
+    for tag in "$@"; do
+      printf '  - "%s"\n' "$tag" >> "$CONFIG_PATH"
+    done
+  fi
+  echo "generated $CONFIG_PATH for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 fi
+chmod 0640 "$CONFIG_PATH"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-slave.service
 systemctl daemon-reload
 
 echo "installed nut-slave"
-echo "generated /etc/nut-server/slave.yaml for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 echo "run: systemctl enable --now nut-slave"

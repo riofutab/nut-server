@@ -130,11 +130,33 @@ esac
 
 asset_name="${package_name}_${VERSION}_linux_${ARCH}.tar.gz"
 download_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
+sha_url="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"
 WORK_DIR=$(mktemp -d)
 archive_path="$WORK_DIR/$asset_name"
+sha_path="$WORK_DIR/SHA256SUMS"
 
 echo "downloading $download_url"
 curl -fsSL "$download_url" -o "$archive_path"
+
+echo "downloading $sha_url"
+curl -fsSL "$sha_url" -o "$sha_path"
+
+(
+  cd "$WORK_DIR"
+  sum_line=$(grep " $asset_name\$" SHA256SUMS || true)
+  if [ -z "$sum_line" ]; then
+    echo "checksum for $asset_name not found in SHA256SUMS" >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s\n' "$sum_line" | sha256sum -c -
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s\n' "$sum_line" | shasum -a 256 -c -
+  else
+    echo "neither sha256sum nor shasum available; cannot verify checksum" >&2
+    exit 1
+  fi
+)
 
 root_name=$(tar -tzf "$archive_path" | head -n 1 | cut -d/ -f1)
 if [ -z "$root_name" ]; then
