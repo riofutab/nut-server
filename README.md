@@ -106,7 +106,7 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 关键字段：
 
 - `listen_addr`: master 监听地址（slave 注册端口）
-- `admin_listen_addr`: 管理 HTTP 监听地址，默认 `127.0.0.1:9001`，状态页与所有管理 API 都在这里
+- `admin_listen_addr`: 管理 HTTP 监听地址，默认 `127.0.0.1:9001`，状态页、所有管理 API 和 Prometheus `/metrics` 都在这里(`/metrics` 不鉴权,靠绑回环保护)
 - `admin_token`（**必填**，v0.2.0+）：管理接口的 Bearer token，可用 `openssl rand -hex 24` 生成
 - `state_file`: master 本地状态文件，保存 active command、节点回执和节点目录，便于重启恢复
 - `auth_tokens`: 允许 slave 注册的 token 列表（恒定时间比较）
@@ -142,6 +142,7 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `token`: 注册 token
 - `tags`: 可选节点标签，用于按标签定向下发 shutdown
 - `state_file`: slave 本地状态文件，保存已处理的 command_id，防止重启后重复执行
+- `metrics_listen_addr`（v0.3.0+，可选）：留空则不暴露;设为回环地址(例如 `127.0.0.1:9101`)启用 `/metrics`,**不鉴权**
 - `reconnect_interval`: 断线重连间隔
 - `dry_run`: true 时收到 shutdown 只记录日志并回 ACK
 - `tls.enabled`: 是否启用 TLS 拨号
@@ -361,6 +362,37 @@ sudo journalctl -u nut-master -o json | jq 'select(.msg == "ups status")'
 ```
 
 `/status` 端点也始终返回最新的 UPS 快照（`last_success_at` / `last_error_at` / 当前电量与剩余分钟）。
+
+## Prometheus 指标(v0.3.0+)
+
+master 在 admin 口同时暴露 `/metrics`(不鉴权,绑回环保护);slave 可选,通过 `metrics_listen_addr` 启用。
+
+```yaml
+# /etc/prometheus/prometheus.yml
+scrape_configs:
+  - job_name: nut-master
+    static_configs:
+      - targets: ["127.0.0.1:9001"]
+  - job_name: nut-slave
+    static_configs:
+      - targets: ["10.0.0.20:9101", "10.0.0.21:9101"]
+```
+
+master 主要指标:
+
+- `nut_master_ups_poll_total{result}` — SNMP 轮询次数(`success` / `error`)
+- `nut_master_ups_on_battery`、`nut_master_ups_battery_charge_percent`、`nut_master_ups_runtime_minutes` — UPS 快照 gauge
+- `nut_master_registered_slaves` — 当前在线 slave 数
+- `nut_master_nodes{state}` — directory 里按状态分桶的节点数
+- `nut_master_shutdowns_issued_total`、`nut_master_shutdown_acks_total{status}`、`nut_master_shutdown_active`
+- `nut_master_local_shutdown_phase{phase}` — 本机 local_shutdown 阶段指示
+- `nut_master_register_attempts_total{result}` — slave 注册结果(`accepted` / `rejected` / `invalid`)
+
+slave 主要指标:
+
+- `nut_slave_connected` — 当前是否有活跃会话
+- `nut_slave_connect_attempts_total{result}` — dial+register 结果(`success` / `dial_error` / `register_error`)
+- `nut_slave_shutdowns_received_total`、`nut_slave_shutdown_status_total{status}`
 
 ## 开发辅助
 

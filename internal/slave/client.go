@@ -5,13 +5,17 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"nut-server/internal/config"
 	"nut-server/internal/protocol"
@@ -60,6 +64,9 @@ func NewClient(cfg config.SlaveConfig) *Client {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if c.cfg.MetricsListenAddr != "" {
+		go c.runMetricsServer(ctx)
+	}
 	delay := c.cfg.ReconnectInterval.Duration
 	for {
 		if err := ctx.Err(); err != nil {
@@ -76,6 +83,22 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		}
 		delay = nextBackoff(delay)
+	}
+}
+
+func (c *Client) runMetricsServer(ctx context.Context) {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(slavePromRegistry(), promhttp.HandlerOpts{}))
+	srv := &http.Server{Addr: c.cfg.MetricsListenAddr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	slog.Info("metrics server starting", "addr", c.cfg.MetricsListenAddr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("metrics server stopped", "err", err)
 	}
 }
 
@@ -131,6 +154,7 @@ func (c *Client) dial() (net.Conn, error) {
 func (c *Client) runOnce(parentCtx context.Context) error {
 	conn, err := c.dial()
 	if err != nil {
+		recordConnectAttempt("dial_error")
 		return fmt.Errorf("dial master %s: %w", c.cfg.MasterAddr, err)
 	}
 	defer conn.Close()
@@ -143,14 +167,19 @@ func (c *Client) runOnce(parentCtx context.Context) error {
 		Token:    c.cfg.Token,
 		Tags:     c.cfg.Tags,
 	}); err != nil {
+		recordConnectAttempt("register_error")
 		return fmt.Errorf("send register: %w", err)
 	}
 
 	session.setReadDeadline(registerAckReadDeadline)
 	if err := c.expectRegisterAck(session.reader); err != nil {
+		recordConnectAttempt("register_error")
 		return err
 	}
 	session.setReadDeadline(0)
+	recordConnectAttempt("success")
+	setConnected(true)
+	defer setConnected(false)
 	slog.Info("registered to master",
 		"master", c.cfg.MasterAddr,
 		"node_id", c.cfg.NodeID,
@@ -223,6 +252,7 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 			}
 		}
 
+		recordShutdownReceived()
 		accepted := protocol.ShutdownAckMessage{
 			CommandID: shutdown.CommandID,
 			NodeID:    c.cfg.NodeID,
@@ -260,6 +290,7 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 			AckedAt:   time.Now().UTC(),
 		}
 		c.setCommandState(executed)
+		recordShutdownStatus(executed.Status)
 		return session.Send(protocol.TypeShutdownAck, executed)
 	}
 
@@ -271,6 +302,7 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 		AckedAt:   time.Now().UTC(),
 	}
 	c.setCommandState(executing)
+	recordShutdownStatus(executing.Status)
 	if err := session.Send(protocol.TypeShutdownAck, executing); err != nil {
 		return err
 	}
@@ -314,6 +346,7 @@ func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMes
 		update.AckedAt = time.Now().UTC()
 	}
 	c.setCommandState(update)
+	recordShutdownStatus(update.Status)
 	session := c.shutdownExecutionSession(commandID)
 	if session == nil {
 		return

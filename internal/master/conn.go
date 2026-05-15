@@ -25,6 +25,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	register, err := s.readRegister(client)
 	if err != nil {
 		slog.Warn("register failed", "peer", conn.RemoteAddr().String(), "err", err)
+		recordRegisterAttempt("invalid")
 		_ = client.Send(protocol.TypeError, protocol.ErrorMessage{Message: err.Error()})
 		return
 	}
@@ -32,6 +33,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	if !security.ValidateToken(s.cfg.AuthTokens, register.Token) {
 		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: "invalid token"})
 		slog.Warn("reject slave: invalid token", "node_id", register.NodeID, "peer", conn.RemoteAddr().String())
+		recordRegisterAttempt("rejected")
 		return
 	}
 
@@ -47,6 +49,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		slog.Error("ack register failed", "node_id", client.NodeID, "err", err)
 		return
 	}
+	recordRegisterAttempt("accepted")
 	slog.Info("slave registered", "node_id", client.NodeID, "hostname", client.Hostname, "tags", client.Tags)
 	if err := s.replayPendingShutdown(client); err != nil {
 		slog.Error("replay pending shutdown failed", "node_id", client.NodeID, "err", err)
@@ -110,6 +113,7 @@ func (s *Server) handleEnvelope(client *Client, env protocol.Envelope) error {
 			return err
 		}
 		s.recordShutdownUpdate(ack)
+		recordShutdownAck(ack.Status)
 		slog.Info("shutdown update",
 			"command_id", ack.CommandID,
 			"node_id", ack.NodeID,

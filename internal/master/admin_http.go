@@ -11,12 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"nut-server/internal/protocol"
 )
 
 func (s *Server) runAdminServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.Handle("GET /metrics", promhttp.HandlerFor(masterPromRegistry(s), promhttp.HandlerOpts{}))
 	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
 	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))

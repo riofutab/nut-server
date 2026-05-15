@@ -4,6 +4,8 @@ token: "replace-with-strong-token"
 tags:
   - "web"
 state_file: "data/slave-state.json"
+# 留空则不暴露 /metrics;建议仅绑回环,例如 "127.0.0.1:9101"
+metrics_listen_addr: ""
 reconnect_interval: "5s"
 dry_run: true
 tls:

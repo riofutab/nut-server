@@ -1,4 +1,5 @@
 listen_addr: ":9000"
+# admin_listen_addr 同时承载状态页、admin API 和 /metrics(/metrics 不鉴权,仅靠绑定回环保护)
 admin_listen_addr: "127.0.0.1:9001"
 admin_token: "replace-with-strong-admin-token"
 state_file: "data/master-state.json"

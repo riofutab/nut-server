@@ -29,9 +29,11 @@ func (s *Server) evaluateUPS() error {
 	status, err := ReadUPSStatus(s.cfg.SNMP)
 	if err != nil {
 		s.recordUPSError(err, polledAt)
+		recordUPSPollResult(false)
 		return err
 	}
 	s.recordUPSSuccess(status, polledAt)
+	recordUPSPollResult(true)
 	if !ShouldShutdown(status, s.cfg.ShutdownPolicy) {
 		return nil
 	}
