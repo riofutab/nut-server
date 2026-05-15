@@ -41,6 +41,16 @@ sudo ./scripts/install-online.sh --role slave --version latest -- \
 
 不传 `--` 后面的参数时，`install-online.sh` 会优先尝试 `.deb` / `.rpm`；传了 role-script 参数则走 tar.gz 路径，方便预填配置。
 
+## Prometheus /metrics(可选)
+
+在 `/etc/nut-server/slave.yaml` 里把 `metrics_listen_addr` 设成回环地址即可启用,留空则不暴露:
+
+```yaml
+metrics_listen_addr: "127.0.0.1:9101"
+```
+
+`/metrics` 不鉴权,靠绑定回环保护。主要指标:`nut_slave_connect_attempts_total{result}`、`nut_slave_connected`、`nut_slave_shutdowns_received_total`、`nut_slave_shutdown_status_total{status}`。
+
 ## 升级（不动配置和状态）
 
 ```bash

@@ -63,3 +63,16 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9001/status
 ```
 
 浏览器打开 `http://127.0.0.1:9001/` 输入 `admin_token` 即可看到只读状态页。
+
+## Prometheus /metrics
+
+同一个 admin 监听口下还暴露 `/metrics`（**不鉴权**,靠 `admin_listen_addr` 绑回环保护)。Prometheus scrape 示例:
+
+```yaml
+scrape_configs:
+  - job_name: nut-master
+    static_configs:
+      - targets: ["127.0.0.1:9001"]
+```
+
+主要指标:`nut_master_ups_poll_total{result}`、`nut_master_ups_on_battery`、`nut_master_ups_battery_charge_percent`、`nut_master_ups_runtime_minutes`、`nut_master_registered_slaves`、`nut_master_nodes{state}`、`nut_master_shutdowns_issued_total`、`nut_master_shutdown_acks_total{status}`、`nut_master_shutdown_active`、`nut_master_local_shutdown_phase{phase}`、`nut_master_register_attempts_total{result}`。

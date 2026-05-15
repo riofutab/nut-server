@@ -88,6 +88,7 @@ func (s *Server) triggerShutdown(request protocol.ShutdownRequest, auto bool) (p
 	s.shutdownIssued.Store(true)
 	s.saveStateLocked()
 	s.commandMu.Unlock()
+	recordShutdownIssued()
 
 	if s.cfg.LocalShutdown.Enabled {
 		slog.Info("local shutdown waiting",

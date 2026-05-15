@@ -58,6 +58,7 @@ type SlaveConfig struct {
 	Token             string    `yaml:"token"`
 	Tags              []string  `yaml:"tags"`
 	StateFile         string    `yaml:"state_file"`
+	MetricsListenAddr string    `yaml:"metrics_listen_addr"`
 	ReconnectInterval Duration  `yaml:"reconnect_interval"`
 	DryRun            bool      `yaml:"dry_run"`
 	TLS               TLSConfig `yaml:"tls"`
