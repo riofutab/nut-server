@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=nut-server
+Group=nut-server
 WorkingDirectory=/usr/local/lib/nut-server
 ExecStart=/usr/local/bin/nut-slave -config /etc/nut-server/slave.yaml
 Restart=always

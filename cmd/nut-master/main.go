@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
-	"log"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"nut-server/internal/config"
 	"nut-server/internal/logging"
@@ -13,16 +17,22 @@ func main() {
 	configPath := flag.String("config", "config/master.yaml", "path to master config")
 	flag.Parse()
 
+	logger := logging.Init("nut-master")
+
 	cfg, err := config.LoadMasterConfig(*configPath)
 	if err != nil {
-		log.Fatalf("load master config: %v", err)
+		logger.Error("load master config failed", "path", *configPath, "err", err)
+		os.Exit(1)
 	}
 
-	logger := logging.New("nut-master")
-	logger.Printf("starting with config %s dry_run=%t", *configPath, cfg.DryRun)
+	logger.Info("starting", "config", *configPath, "dry_run", cfg.DryRun)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	server := master.NewServer(cfg)
-	if err := server.Run(); err != nil {
-		logger.Fatalf("run master: %v", err)
+	if err := server.Run(ctx); err != nil {
+		slog.Error("run master failed", "err", err)
+		os.Exit(1)
 	}
 }

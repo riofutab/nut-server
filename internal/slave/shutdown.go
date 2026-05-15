@@ -2,12 +2,12 @@ package slave
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 )
 
 type ShutdownExecutor interface {
-	Execute(logger *log.Logger) error
+	Execute(logger *slog.Logger) error
 }
 
 type CommandShutdownExecutor struct {
@@ -15,13 +15,13 @@ type CommandShutdownExecutor struct {
 	DryRun  bool
 }
 
-func (s CommandShutdownExecutor) Execute(logger *log.Logger) error {
+func (s CommandShutdownExecutor) Execute(logger *slog.Logger) error {
 	if len(s.Command) == 0 {
 		return fmt.Errorf("shutdown command is empty")
 	}
 	if s.DryRun {
 		if logger != nil {
-			logger.Printf("dry-run enabled, skip shutdown command: %v", s.Command)
+			logger.Info("dry-run skip shutdown command", "command", s.Command)
 		}
 		return nil
 	}

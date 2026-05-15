@@ -20,7 +20,12 @@ jobs:
         with:
           go-version: '1.22.x'
 
-      - name: Build release archives
+      - name: Install nfpm
+        run: |
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.41.3/nfpm_2.41.3_amd64.deb -o /tmp/nfpm.deb
+          sudo dpkg -i /tmp/nfpm.deb
+
+      - name: Build release artifacts
         run: VERSION=${{ github.ref_name }} ./scripts/package-release.sh
 
       - name: Create GitHub release
@@ -33,4 +38,6 @@ jobs:
           generate_release_notes: true
           files: |
             dist/release/*.tar.gz
+            dist/release/*.deb
+            dist/release/*.rpm
             dist/release/SHA256SUMS

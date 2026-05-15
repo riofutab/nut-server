@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"os"
@@ -59,18 +59,37 @@ func NewClient(cfg config.SlaveConfig) *Client {
 	return client
 }
 
-func (c *Client) Run() error {
+func (c *Client) Run(ctx context.Context) error {
 	delay := c.cfg.ReconnectInterval.Duration
 	for {
-		err := c.runOnce()
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		err := c.runOnce(ctx)
 		if err != nil {
-			log.Printf("slave connection ended: %v", err)
+			slog.Warn("slave connection ended", "master", c.cfg.MasterAddr, "node_id", c.cfg.NodeID, "err", err)
 		}
 		if err == nil {
 			delay = c.cfg.ReconnectInterval.Duration
 		}
-		time.Sleep(jitterDuration(delay))
+		if !sleepWithContext(ctx, jitterDuration(delay)) {
+			return nil
+		}
 		delay = nextBackoff(delay)
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -109,7 +128,7 @@ func (c *Client) dial() (net.Conn, error) {
 	return tls.Dial("tcp", c.cfg.MasterAddr, c.tlsConfig)
 }
 
-func (c *Client) runOnce() error {
+func (c *Client) runOnce(parentCtx context.Context) error {
 	conn, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("dial master %s: %w", c.cfg.MasterAddr, err)
@@ -132,11 +151,19 @@ func (c *Client) runOnce() error {
 		return err
 	}
 	session.setReadDeadline(0)
-	log.Printf("registered to master %s as %s tags=%v tls=%t", c.cfg.MasterAddr, c.cfg.NodeID, c.cfg.Tags, c.cfg.TLS.EnabledForClient())
+	slog.Info("registered to master",
+		"master", c.cfg.MasterAddr,
+		"node_id", c.cfg.NodeID,
+		"tags", c.cfg.Tags,
+		"tls", c.cfg.TLS.EnabledForClient())
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	go c.runPingLoop(ctx, session, conn)
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
 
 	for {
 		env, err := readEnvelope(session.reader)
@@ -221,7 +248,10 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 
 func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *connectionSession) error {
 	if shutdown.DryRun || c.cfg.DryRun {
-		log.Printf("dry-run shutdown command received node_id=%s command_id=%s reason=%s", c.cfg.NodeID, shutdown.CommandID, shutdown.Reason)
+		slog.Info("dry-run shutdown received",
+			"command_id", shutdown.CommandID,
+			"node_id", c.cfg.NodeID,
+			"reason", shutdown.Reason)
 		executed := protocol.ShutdownAckMessage{
 			CommandID: shutdown.CommandID,
 			NodeID:    c.cfg.NodeID,
@@ -278,7 +308,7 @@ func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMes
 		Message:   "shutdown command completed",
 		AckedAt:   time.Now().UTC(),
 	}
-	if err := c.shutdown.Execute(log.Default()); err != nil {
+	if err := c.shutdown.Execute(slog.Default()); err != nil {
 		update.Status = protocol.ShutdownStatusFailed
 		update.Message = err.Error()
 		update.AckedAt = time.Now().UTC()
@@ -289,7 +319,11 @@ func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMes
 		return
 	}
 	if err := session.Send(protocol.TypeShutdownAck, update); err != nil {
-		log.Printf("report shutdown status failed node_id=%s command_id=%s status=%s: %v", c.cfg.NodeID, shutdown.CommandID, update.Status, err)
+		slog.Error("report shutdown status failed",
+			"command_id", shutdown.CommandID,
+			"node_id", c.cfg.NodeID,
+			"status", update.Status,
+			"err", err)
 	}
 }
 

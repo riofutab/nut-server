@@ -3,7 +3,7 @@ package slave
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 
 	"nut-server/internal/atomicfile"
@@ -19,12 +19,12 @@ func (c *Client) loadState() {
 		if errors.Is(err, os.ErrNotExist) {
 			return
 		}
-		log.Printf("load slave state failed: %v", err)
+		slog.Error("load slave state failed", "path", c.cfg.StateFile, "err", err)
 		return
 	}
 	var state map[string]protocol.ShutdownAckMessage
 	if err := json.Unmarshal(content, &state); err != nil {
-		log.Printf("decode slave state failed: %v", err)
+		slog.Error("decode slave state failed", "path", c.cfg.StateFile, "err", err)
 		return
 	}
 	if state == nil {
@@ -39,10 +39,10 @@ func (c *Client) saveStateLocked() {
 	}
 	content, err := json.MarshalIndent(c.commandStates, "", "  ")
 	if err != nil {
-		log.Printf("encode slave state failed: %v", err)
+		slog.Error("encode slave state failed", "err", err)
 		return
 	}
 	if err := atomicfile.WriteFile(c.cfg.StateFile, content, 0o600); err != nil {
-		log.Printf("write slave state failed: %v", err)
+		slog.Error("write slave state failed", "path", c.cfg.StateFile, "err", err)
 	}
 }

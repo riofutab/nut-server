@@ -1,0 +1,45 @@
+name: nut-master
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+section: admin
+priority: optional
+maintainer: nut-server maintainers <noreply@nut-server.local>
+description: |
+  Master service for nut-server. Coordinates UPS shutdown across registered
+  slave nodes, exposes an admin HTTP API, and persists command state.
+vendor: nut-server
+homepage: https://github.com/riofutab/nut-server
+license: MIT
+
+contents:
+  - src: dist/linux-${BUILD_ARCH}/nut-master
+    dst: /usr/local/bin/nut-master
+    file_info:
+      mode: 0755
+
+  - src: packaging/systemd/nut-master.service
+    dst: /lib/systemd/system/nut-master.service
+    file_info:
+      mode: 0644
+
+  - src: configs/master.example.yaml
+    dst: /etc/nut-server/master.example.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - dst: /etc/nut-server
+    type: dir
+    file_info:
+      mode: 0750
+
+  - dst: /var/lib/nut-server
+    type: dir
+    file_info:
+      mode: 0750
+
+scripts:
+  postinstall: packaging/nfpm/master.postinst.sh
+  preremove: packaging/nfpm/master.prerm.sh

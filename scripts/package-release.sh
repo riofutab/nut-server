@@ -41,10 +41,11 @@ copy_master_files() {
 copy_slave_files() {
   src_dir="$1"
   stage_dir="$2"
-  mkdir -p "$stage_dir/bin" "$stage_dir/configs" "$stage_dir/systemd" "$stage_dir/scripts"
+  mkdir -p "$stage_dir/bin" "$stage_dir/configs" "$stage_dir/systemd" "$stage_dir/scripts" "$stage_dir/sudoers"
   cp "$src_dir/nut-slave" "$stage_dir/bin/nut-slave"
   cp "$src_dir/configs/slave.example.yaml" "$stage_dir/configs/slave.example.yaml"
   cp "$src_dir/packaging/systemd/nut-slave.service" "$stage_dir/systemd/nut-slave.service"
+  cp "$src_dir/packaging/sudoers/nut-server-slave" "$stage_dir/sudoers/nut-server-slave"
   cp "$src_dir/scripts/install-slave.sh" "$stage_dir/scripts/install-slave.sh"
   cp "$src_dir/scripts/quick-install-slave.sh" "$stage_dir/scripts/quick-install-slave.sh"
   cp "$src_dir/scripts/install-online.sh" "$stage_dir/scripts/install-online.sh"
@@ -116,24 +117,69 @@ package_upgrade() {
   write_archive "$archive" "$stage_dir"
 }
 
+package_nfpm() {
+  arch="$1"
+  fmt="$2"
+  config="$3"
+  name="$4"
+
+  case "$fmt" in
+    deb) nfpm_arch="$arch" ;;
+    rpm)
+      case "$arch" in
+        amd64) nfpm_arch="x86_64" ;;
+        arm64) nfpm_arch="aarch64" ;;
+        *) nfpm_arch="$arch" ;;
+      esac
+      ;;
+  esac
+
+  pkg_version_clean=$(printf %s "$VERSION" | sed 's/^v//')
+  rendered="$RELEASE_DIR/.nfpm-$(basename "$config")-${arch}-${fmt}.yaml"
+  sed \
+    -e "s|\${NFPM_ARCH}|${nfpm_arch}|g" \
+    -e "s|\${BUILD_ARCH}|${arch}|g" \
+    -e "s|\${VERSION}|${pkg_version_clean}|g" \
+    "$ROOT_DIR/$config" > "$rendered"
+  (cd "$ROOT_DIR" && nfpm pkg \
+    --config "$rendered" \
+    --packager "$fmt" \
+    --target "$RELEASE_DIR/${name}_${pkg_version_clean}_linux_${arch}.${fmt}")
+  rm -f "$rendered"
+}
+
 for arch in amd64 arm64
 do
   package_full "$arch"
   package_master "$arch"
   package_slave "$arch"
   package_upgrade "$arch"
+
+  if command -v nfpm >/dev/null 2>&1; then
+    package_nfpm "$arch" deb packaging/nfpm/master.yaml nut-master
+    package_nfpm "$arch" rpm packaging/nfpm/master.yaml nut-master
+    package_nfpm "$arch" deb packaging/nfpm/slave.yaml nut-slave
+    package_nfpm "$arch" rpm packaging/nfpm/slave.yaml nut-slave
+  else
+    echo "nfpm not installed; skipping .deb/.rpm packaging" >&2
+  fi
 done
 
 (
   cd "$RELEASE_DIR"
+  artifacts=$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) | sed 's|^\./||' | sort)
+  if [ -z "$artifacts" ]; then
+    echo "no release artifacts to checksum" >&2
+    exit 1
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum *.tar.gz > SHA256SUMS
+    printf '%s\n' "$artifacts" | xargs sha256sum > SHA256SUMS
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 *.tar.gz > SHA256SUMS
+    printf '%s\n' "$artifacts" | xargs shasum -a 256 > SHA256SUMS
   else
     echo "neither sha256sum nor shasum available" >&2
     exit 1
   fi
 )
 
-echo "release archives and SHA256SUMS generated under $RELEASE_DIR"
+echo "release artifacts and SHA256SUMS generated under $RELEASE_DIR"

@@ -3,7 +3,7 @@ package master
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 
 	"nut-server/internal/atomicfile"
@@ -28,12 +28,12 @@ func (s *Server) loadState() {
 		if errors.Is(err, os.ErrNotExist) {
 			return
 		}
-		log.Printf("load master state failed: %v", err)
+		slog.Error("load master state failed", "path", s.cfg.StateFile, "err", err)
 		return
 	}
 	var state persistedState
 	if err := json.Unmarshal(content, &state); err != nil {
-		log.Printf("decode master state failed: %v", err)
+		slog.Error("decode master state failed", "path", s.cfg.StateFile, "err", err)
 		return
 	}
 	if state.Commands == nil {
@@ -71,11 +71,11 @@ func (s *Server) saveStateLocked() {
 	}
 	content, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		log.Printf("encode master state failed: %v", err)
+		slog.Error("encode master state failed", "err", err)
 		return
 	}
 	if err := atomicfile.WriteFile(s.cfg.StateFile, content, 0o600); err != nil {
-		log.Printf("write master state failed: %v", err)
+		slog.Error("write master state failed", "path", s.cfg.StateFile, "err", err)
 	}
 }
 
