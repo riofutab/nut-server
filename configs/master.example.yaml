@@ -2,6 +2,10 @@ listen_addr: ":9000"
 # admin_listen_addr 同时承载状态页、admin API 和 /metrics(/metrics 不鉴权,仅靠绑定回环保护)
 admin_listen_addr: "127.0.0.1:9001"
 admin_token: "replace-with-strong-admin-token"
+# public_addr: slave 从 /install/slave 收到的 master_addr。留空时回退到请求的 Host header + listen_addr 端口。
+public_addr: ""
+# install_repo: /install/slave 用来拉取 install-online.sh 的 GitHub 仓库。留空使用默认上游。
+install_repo: ""
 state_file: "data/master-state.json"
 auth_tokens:
   - "replace-with-strong-token"

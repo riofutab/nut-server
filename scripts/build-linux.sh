@@ -4,6 +4,8 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 DIST_DIR="$ROOT_DIR/dist"
+VERSION=${VERSION:-dev}
+LDFLAGS="-s -w -X nut-server/internal/version.Version=${VERSION}"
 
 build_target() {
   arch="$1"
@@ -14,8 +16,8 @@ build_target() {
 
   (
     cd "$ROOT_DIR"
-    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -o "$out_dir/nut-master" ./cmd/nut-master
-    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -o "$out_dir/nut-slave" ./cmd/nut-slave
+    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -ldflags "$LDFLAGS" -o "$out_dir/nut-master" ./cmd/nut-master
+    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -ldflags "$LDFLAGS" -o "$out_dir/nut-slave" ./cmd/nut-slave
   )
 
   cp "$ROOT_DIR/configs/master.example.yaml" "$out_dir/configs/master.example.yaml"

@@ -12,6 +12,8 @@ type MasterConfig struct {
 	ListenAddr      string         `yaml:"listen_addr"`
 	AdminListenAddr string         `yaml:"admin_listen_addr"`
 	AdminToken      string         `yaml:"admin_token"`
+	PublicAddr      string         `yaml:"public_addr"`
+	InstallRepo     string         `yaml:"install_repo"`
 	StateFile       string         `yaml:"state_file"`
 	AuthTokens      []string       `yaml:"auth_tokens"`
 	PollInterval    Duration       `yaml:"poll_interval"`

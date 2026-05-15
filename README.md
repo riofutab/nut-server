@@ -274,6 +274,19 @@ sudo ./scripts/install-online.sh --role slave --version latest -- \
 
 只要 `--` 后面带了 role-script 参数，`install-online.sh` 会自动走 tar.gz 路径让脚本预填配置。
 
+### 方案 C: 从 master 拉装机一行(v0.3.0+)
+
+master 起来之后,可以直接让目标机自己从 master 拉:
+
+```bash
+ADMIN_TOKEN=...
+curl -fsSL -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://master.host:9001/install/slave?node_id=db-01" \
+  | sudo bash
+```
+
+master 会返回填好 `--master-addr` / `--token` / `--node-id` 的 `install-online.sh` 一行装,并把 `node_id` 预先标记为预期注册(`expected`)。`master_addr` 优先取配置里的 `public_addr`,留空时回退到 Host header。详见 `README-master.md`。
+
 如果你已经把发布包解压到本地，也可以直接调用：
 
 ```bash
@@ -421,4 +434,3 @@ go test -tags e2e -count=1 ./internal/e2e/...
 
 - 更完整的 SNMP 厂商兼容（APC / Eaton 等）
 - 多策略组合关机条件
-- master 一键 install slave endpoint（`/install/slave` 返回 curl-shell 一行装）
