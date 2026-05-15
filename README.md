@@ -235,83 +235,98 @@ make package
 
 ## systemd 部署
 
-已提供：
-
-- `packaging/systemd/nut-master.service`
-- `packaging/systemd/nut-slave.service`
-
 默认约定：
 
-- 二进制路径：`/usr/local/bin/nut-master`、`/usr/local/bin/nut-slave`
-- 配置路径：`/etc/nut-server/master.yaml`、`/etc/nut-server/slave.yaml`
+- 二进制：`/usr/local/bin/nut-master`、`/usr/local/bin/nut-slave`
+- 配置：`/etc/nut-server/master.yaml`、`/etc/nut-server/slave.yaml`
+- systemd unit：`packaging/systemd/nut-master.service`、`packaging/systemd/nut-slave.service`
+- 服务用户：master 与 slave 都以 `nut-server` 用户运行。slave 通过 `/etc/sudoers.d/nut-server-slave` 受限授权 `shutdown` 命令；master 在安装时通过 systemd 沙箱（`NoNewPrivileges` 等）进一步加固。
 
-### 安装 master
+### 方案 A：apt / yum / dnf 一键安装（推荐，v0.2.0+）
 
 ```bash
-sudo ./scripts/install-master.sh \
-  --token your-token \
-  --snmp-target 10.0.0.31 \
-  --listen-addr :9000 \
-  --snmp-community public \
+# 在线脚本会自动检测包管理器，下载已校验的 .deb 或 .rpm
+curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
+  | sudo sh -s -- --role master --version latest
+
+curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
+  | sudo sh -s -- --role slave --version latest
+```
+
+包安装会自动建 `nut-server` 用户、装 sudoers、chown 配置目录，并在 master 首次安装时随机生成 `admin_token` 写入 `/etc/nut-server/master.yaml`。安装完成后还需要：
+
+```bash
+# master：补齐 auth_tokens 与 snmp.target
+sudo $EDITOR /etc/nut-server/master.yaml
+sudo systemctl enable --now nut-master
+
+# slave：补齐 node_id / master_addr / token
+sudo $EDITOR /etc/nut-server/slave.yaml
+sudo systemctl enable --now nut-slave
+```
+
+`--pkg` 可以强制安装格式：`--pkg deb` / `--pkg rpm` / `--pkg tar`（默认 `auto`）。
+
+### 方案 B：tar.gz + 预填配置脚本
+
+适合一次性预填 token、SNMP 目标等参数的场景：
+
+```bash
+sudo ./scripts/install-online.sh --role master --version latest -- \
+  --token your-token --admin-token "$(openssl rand -hex 24)" --snmp-target 10.0.0.31
+
+sudo ./scripts/install-online.sh --role slave --version latest -- \
+  --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+```
+
+只要 `--` 后面带了 role-script 参数，`install-online.sh` 会自动走 tar.gz 路径让脚本预填配置。
+
+如果你已经把发布包解压到本地，也可以直接调用：
+
+```bash
+sudo ./scripts/install-master.sh --token your-token --admin-token "$(openssl rand -hex 24)" --snmp-target 10.0.0.31
+sudo ./scripts/install-slave.sh  --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+```
+
+启用 TLS 时追加：
+
+```bash
+# master
   --tls-cert-file /etc/nut-server/tls/master.crt \
   --tls-key-file /etc/nut-server/tls/master.key
-```
+# mTLS
+  --tls-ca-file /etc/nut-server/tls/ca.crt --tls-require-client-cert
 
-如需 mTLS，再追加：
-
-```bash
-  --tls-ca-file /etc/nut-server/tls/ca.crt \
-  --tls-require-client-cert
-```
-
-安装脚本会直接生成 `/etc/nut-server/master.yaml`；如需启用 TLS，可在执行时传入 `--tls-*` 参数；如需调整 `dry_run`、阈值或 OID，再手工编辑配置。
-
-内网不启用 TLS 时，可直接在命令末尾追加 `--disable-tls`；该开关会忽略所有 `--tls-*` 参数。
-
-管理接口默认监听 `127.0.0.1:9001`，可用于：
-
-```bash
-curl http://127.0.0.1:9001/status
-curl -X POST http://127.0.0.1:9001/commands/reset
-curl -X POST http://127.0.0.1:9001/commands/shutdown \
-  -H 'Content-Type: application/json' \
-  -d '{"reason":"manual test","node_ids":["slave-01"]}'
-curl -X POST http://127.0.0.1:9001/commands/shutdown \
-  -H 'Content-Type: application/json' \
-  -d '{"reason":"tag test","tags":["web"],"timeout_seconds":10}'
-```
-
-### 安装 slave
-
-```bash
-sudo ./scripts/install-slave.sh \
-  --node-id slave-01 \
-  --master-addr 10.0.0.10:9000 \
-  --token your-token \
-  --tags web,prod \
+# slave
   --tls-ca-file /etc/nut-server/tls/ca.crt \
   --tls-server-name nut-master.internal
-```
-
-如需 mTLS，再追加：
-
-```bash
+# 客户端证书
   --tls-cert-file /etc/nut-server/tls/slave.crt \
   --tls-key-file /etc/nut-server/tls/slave.key
 ```
 
-安装脚本会直接生成 `/etc/nut-server/slave.yaml`，因此执行后即可启动；如需调整 `dry_run`、`shutdown_command` 或 TLS 细节，再手工编辑配置。
+内网不启用 TLS 时，命令末尾加 `--disable-tls` 即可忽略所有 `--tls-*` 参数。
 
-内网不启用 TLS 时，可直接在命令末尾追加 `--disable-tls`；该开关会忽略所有 `--tls-*` 参数。
+### 管理接口 / 状态页
 
-安装脚本既可以在源码根目录运行，也可以在 `dist/linux-amd64/` 或 `dist/linux-arm64/` 发布目录中运行。
-
-安装后：
+管理接口默认监听 `127.0.0.1:9001`，**所有请求都需要 `Authorization: Bearer <admin_token>`**（v0.2.0+）：
 
 ```bash
-sudo systemctl enable --now nut-master
-sudo systemctl enable --now nut-slave
+TOKEN=$(sudo awk '/^admin_token:/ {print $2}' /etc/nut-server/master.yaml | tr -d '"')
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9001/status
+curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/commands/reset
+curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/commands/shutdown \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"manual test","node_ids":["slave-01"]}'
+
+# 登记一个预期但还没上线的节点（在 /status 中显示为 never_seen）
+curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/nodes/expect \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id":"printer","hostname":"printer.lan","tags":["office"]}'
 ```
+
+只读状态页：浏览器打开 `http://<master>:9001/`，输入 admin_token 即可看到 UPS、节点列表（state / 主机名 / 标签 / 最近活跃时间）、当前活动命令；每 5 秒自动刷新。token 只放在 `sessionStorage`，关闭页面即失效。状态页是只读的，不提供关机/重置按钮。
 
 ## 推到 GitHub 前建议
 
@@ -356,12 +371,17 @@ make run-slave
 
 ## Release Packages
 
-Published releases now include these archive families for both `amd64` and `arm64`:
+Each tagged release publishes the following artifacts for both `amd64` and `arm64`:
 
-- `nut-server_<version>_linux_<arch>.tar.gz`
-- `nut-master_<version>_linux_<arch>.tar.gz`
-- `nut-slave_<version>_linux_<arch>.tar.gz`
-- `nut-server-upgrade_<version>_linux_<arch>.tar.gz`
+- **Linux packages (v0.2.0+)**：
+  - `nut-master_<version>_linux_<arch>.deb` / `.rpm`
+  - `nut-slave_<version>_linux_<arch>.deb` / `.rpm`
+- **tar.gz**（旧路径，仍然保留）：
+  - `nut-server_<version>_linux_<arch>.tar.gz`
+  - `nut-master_<version>_linux_<arch>.tar.gz`
+  - `nut-slave_<version>_linux_<arch>.tar.gz`
+  - `nut-server-upgrade_<version>_linux_<arch>.tar.gz`
+- `SHA256SUMS`：覆盖以上所有产物。`install-online.sh` 下载后自动校验。
 
 Quick install wrappers default to plain TCP for internal networks unless you pass normal `--tls-*` options:
 
@@ -370,12 +390,22 @@ sudo ./scripts/quick-install-master.sh --token your-token --snmp-target 10.0.0.3
 sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
 ```
 
-Online install can download a published release package and hand off to the role-specific install or upgrade script:
+Online install detects `apt` / `dnf` / `yum` and prefers the matching `.deb` / `.rpm`. Pass `--pkg deb|rpm|tar` to force a format, or pass role-script options after `--` to force the tar path so flags like `--token`, `--snmp-target`, `--admin-token` can prefill the config:
 
 ```bash
-sudo ./scripts/install-online.sh --role master --version v0.1.4 -- --token your-token --snmp-target 10.0.0.31
-sudo ./scripts/install-online.sh --role slave --version latest -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+# Auto: package manager when available, tar.gz otherwise. master needs config edit afterwards.
+sudo ./scripts/install-online.sh --role master --version latest
+sudo ./scripts/install-online.sh --role slave  --version latest
+
+# Tar path with prefill
+sudo ./scripts/install-online.sh --role master --version latest -- \
+  --token your-token --admin-token "$(openssl rand -hex 24)" --snmp-target 10.0.0.31
+sudo ./scripts/install-online.sh --role slave  --version latest -- \
+  --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+
+# Upgrade-only (always tar.gz — preserves config + state)
 sudo ./scripts/install-online.sh --role upgrade-master --version latest
+sudo ./scripts/install-online.sh --role upgrade-slave  --version latest
 ```
 
 Upgrade scripts only replace binaries and systemd unit files. Existing config and state files stay in place:
