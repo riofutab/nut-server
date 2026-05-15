@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
+	"os/signal"
+	"syscall"
 
 	"nut-server/internal/config"
 	"nut-server/internal/logging"
@@ -21,8 +24,11 @@ func main() {
 	logger := logging.New("nut-slave")
 	logger.Printf("starting with config %s dry_run=%t", *configPath, cfg.DryRun)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	client := slave.NewClient(cfg)
-	if err := client.Run(); err != nil {
+	if err := client.Run(ctx); err != nil {
 		logger.Fatalf("run slave: %v", err)
 	}
 }

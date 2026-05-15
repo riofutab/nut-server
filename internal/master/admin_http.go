@@ -1,17 +1,20 @@
 package master
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"nut-server/internal/protocol"
 )
 
-func (s *Server) runAdminServer() {
+func (s *Server) runAdminServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
@@ -20,7 +23,15 @@ func (s *Server) runAdminServer() {
 	mux.HandleFunc("POST /nodes/expect", s.requireAdminToken(s.handleExpectNode))
 	mux.HandleFunc("DELETE /nodes/expect/{node_id}", s.requireAdminToken(s.handleUnsetExpected))
 	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
-	if err := http.ListenAndServe(s.cfg.AdminListenAddr, mux); err != nil {
+
+	srv := &http.Server{Addr: s.cfg.AdminListenAddr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("admin server stopped: %v", err)
 	}
 }

@@ -1,13 +1,14 @@
 package master
 
 import (
+	"context"
 	"log"
 	"time"
 
 	"nut-server/internal/protocol"
 )
 
-func (s *Server) runPollingLoop() {
+func (s *Server) runPollingLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.PollInterval.Duration)
 	defer ticker.Stop()
 
@@ -15,7 +16,11 @@ func (s *Server) runPollingLoop() {
 		if err := s.evaluateUPS(); err != nil {
 			log.Printf("poll UPS failed: %v", err)
 		}
-		<-ticker.C
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

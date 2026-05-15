@@ -2,6 +2,7 @@ package slave
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"log"
 	"net"
@@ -425,5 +426,31 @@ func TestJitterDurationStaysWithinBand(t *testing.T) {
 	}
 	if jitterDuration(0) != 0 {
 		t.Fatalf("jitterDuration(0) should be 0")
+	}
+}
+
+func TestRunReturnsCleanlyWhenContextCancelled(t *testing.T) {
+	client := NewClient(config.SlaveConfig{
+		MasterAddr:        "127.0.0.1:1",
+		NodeID:            "test-node",
+		Token:             "t",
+		ReconnectInterval: config.Duration{Duration: 100 * time.Millisecond},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error on graceful shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("slave Run did not return within 2s of context cancel")
 	}
 }

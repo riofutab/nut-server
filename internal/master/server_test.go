@@ -3,6 +3,7 @@ package master
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -1204,5 +1205,46 @@ func TestHandleIndexServesEmbeddedHTML(t *testing.T) {
 	}
 	if !strings.Contains(body, "fetch('/status'") {
 		t.Fatal("response does not reference /status endpoint")
+	}
+}
+
+func TestRunReturnsCleanlyWhenContextCancelled(t *testing.T) {
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	tcpAddr := tcpListener.Addr().String()
+	tcpListener.Close()
+
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	httpAddr := httpListener.Addr().String()
+	httpListener.Close()
+
+	server := NewServer(config.MasterConfig{
+		ListenAddr:      tcpAddr,
+		AdminListenAddr: httpAddr,
+		AdminToken:      "secret",
+		AuthTokens:      []string{"t"},
+		PollInterval:    config.Duration{Duration: 30 * time.Second},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- server.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error on graceful shutdown: %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Run did not return within 6s of context cancel")
 	}
 }

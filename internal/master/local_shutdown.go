@@ -1,6 +1,7 @@
 package master
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
@@ -9,10 +10,15 @@ import (
 	"nut-server/internal/protocol"
 )
 
-func (s *Server) runCommandWatcher() {
+func (s *Server) runCommandWatcher(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		now := time.Now().UTC()
 		s.markTimedOutCommands(now)
 		s.evaluateLocalShutdown(now, s.latestSuccessfulUPSStatus())

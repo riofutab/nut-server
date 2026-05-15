@@ -1,8 +1,10 @@
 package master
 
 import (
+	"context"
 	"crypto/tls"
 	"embed"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -82,7 +84,7 @@ func (s *Server) listen() (net.Listener, error) {
 	return tls.Listen("tcp", s.cfg.ListenAddr, s.tlsConfig)
 }
 
-func (s *Server) Run() error {
+func (s *Server) Run(ctx context.Context) error {
 	listener, err := s.listen()
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.cfg.ListenAddr, err)
@@ -90,13 +92,26 @@ func (s *Server) Run() error {
 	defer listener.Close()
 
 	log.Printf("master listening on %s tls=%t mTLS=%t", s.cfg.ListenAddr, s.cfg.TLS.EnabledForServer(), s.cfg.TLS.RequireClientCert)
-	go s.runPollingLoop()
-	go s.runAdminServer()
-	go s.runCommandWatcher()
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); s.runPollingLoop(ctx) }()
+	go func() { defer wg.Done(); s.runAdminServer(ctx) }()
+	go func() { defer wg.Done(); s.runCommandWatcher(ctx) }()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				log.Printf("master shutting down: %v", ctx.Err())
+				wg.Wait()
+				return nil
+			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
 		go s.handleConn(conn)

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
+	"os/signal"
+	"syscall"
 
 	"nut-server/internal/config"
 	"nut-server/internal/logging"
@@ -21,8 +24,11 @@ func main() {
 	logger := logging.New("nut-master")
 	logger.Printf("starting with config %s dry_run=%t", *configPath, cfg.DryRun)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	server := master.NewServer(cfg)
-	if err := server.Run(); err != nil {
+	if err := server.Run(ctx); err != nil {
 		logger.Fatalf("run master: %v", err)
 	}
 }
