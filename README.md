@@ -1,16 +1,52 @@
 # nut-server
 
-一个基于 Go 的轻量 NUT 风格主从程序。
+[![CI](https://github.com/riofutab/nut-server/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/riofutab/nut-server/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/riofutab/nut-server?sort=semver)](https://github.com/riofutab/nut-server/releases/latest)
+[![License](https://img.shields.io/github/license/riofutab/nut-server)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](go.mod)
 
-`nut-master` 通过 SNMP 轮询 UPS 状态；`nut-slave` 主动注册到 master；当满足关机策略时，master 向所有匹配的 slave 下发关机指令。`dry_run` 模式可以先把整条链路跑一遍而不真正关机。
+> **Lightweight NUT-style UPS shutdown orchestrator for homelabs and small fleets.**
+> 轻量 NUT 风格 UPS 关机编排,适合 homelab 与小型机房:master 通过 SNMP 轮询 UPS, slave 主动注册并在策略命中时执行关机, 全程 mTLS / Bearer token / Prometheus 可观测、`.deb` / `.rpm` / `.tar.gz` 三件套发布。
 
-UPS 读取默认按 UPS-MIB：
+## Quick start
 
-- `output_source_oid` 判断是否切到电池供电
-- `charge_oid` 读取电池电量百分比
-- `runtime_minutes_oid` 读取剩余运行时间（分钟）
+在 master 主机一行装好:
 
-仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本，以及 GitHub Actions 工作流：每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.3.0](https://github.com/riofutab/nut-server/releases/tag/v0.3.0)。
+```bash
+curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
+  | sudo bash -s -- --role master --version latest -- \
+      --token "$(openssl rand -hex 24)" \
+      --admin-token "$(openssl rand -hex 24)" \
+      --snmp-target 10.0.0.31
+```
+
+在每台需要被关机的 slave 上一行装好(注意 `--master-addr` 改成你 master 的地址,`--token` 用 master 的 `auth_tokens[0]`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
+  | sudo bash -s -- --role slave --version latest -- \
+      --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+```
+
+`dry_run` 默认开启,先把链路跑通确认 `/status` 看到 slave 在线再切真实关机。详细配置看 [README-master.md](README-master.md) / [README-slave.md](README-slave.md);版本升级看 [README-upgrade.md](README-upgrade.md)。
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UPS[("UPS\n(SNMP)")] -- poll --> M["nut-master\nlisten :9000\nadmin :9001"]
+    M -- "shutdown\n(by tag / node_id / all)" --> S1["nut-slave\nweb-01"]
+    M -- shutdown --> S2["nut-slave\ndb-01"]
+    M -- shutdown --> S3["nut-slave\n..."]
+    Prom["Prometheus"] -- "scrape /metrics" --> M
+    Op[("admin")] -- "Bearer admin_token\nHTTP /status, /commands/shutdown,\n/install/slave"  --> M
+```
+
+每台 slave 通过 TCP/TLS 长连接挂在 master 上,断线自动指数 backoff 重连;master 收到 UPS 触发条件后按多策略合并出 target 集合,并发下发 shutdown,等远端 `executed` 回执后(可选)再关本机。
+
+仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.3.0](https://github.com/riofutab/nut-server/releases/tag/v0.3.0)。
+
+UPS 读取默认按 UPS-MIB:`output_source_oid` 判断是否切到电池供电 · `charge_oid` 读取电量百分比 · `runtime_minutes_oid` 读取剩余分钟数。
 
 ## 项目结构
 
