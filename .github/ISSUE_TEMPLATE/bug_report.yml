@@ -1,0 +1,77 @@
+name: Bug report
+description: 报告一个 bug / 不预期的行为
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报 bug! 提交前请确认:
+        - 这**不是**安全问题 (有的话走 [SECURITY.md](../blob/master/SECURITY.md), 不要开公开 issue)
+        - 已经在 [latest release](https://github.com/riofutab/nut-server/releases/latest) 上复现过
+
+  - type: input
+    id: version
+    attributes:
+      label: 受影响版本
+      description: 跑 `nut-master --version` 或者贴 git tag
+      placeholder: v0.3.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: role
+    attributes:
+      label: 哪个组件出问题
+      options:
+        - master
+        - slave
+        - 装机脚本 (install-online.sh / install-master.sh / install-slave.sh)
+        - systemd unit / 沙箱
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象描述
+      description: 实际行为 vs 预期行为
+      placeholder: |
+        实际: slave 注册后 10 秒就被标 offline
+        预期: slave 一直在线
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 最小复现链路, 越精确越好
+      placeholder: |
+        1. master.yaml: ...
+        2. slave.yaml: ...
+        3. 启动 master / slave
+        4. 等 10 秒
+        5. 观察 /status
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志 / 状态
+      description: '`journalctl -u nut-master -n 100` 输出, /status 返回, 等等。**自动 mask 你的 token / IP 等敏感字段**'
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      description: 发行版 + 内核 + 架构
+      placeholder: "Debian 12 / kernel 6.1 / amd64"
+    validations:
+      required: false
