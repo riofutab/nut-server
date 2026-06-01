@@ -54,10 +54,16 @@ func (s *Server) handleInstallSlave(w http.ResponseWriter, r *http.Request) {
 }
 
 func renderInstallScript(repo, releaseTag, nodeID, masterAddr, token string) string {
-	scriptURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/install-online.sh", repo, releaseTag)
-	if releaseTag == "latest" {
-		scriptURL = fmt.Sprintf("https://raw.githubusercontent.com/%s/master/scripts/install-online.sh", repo)
+	// install-online.sh is committed to the repo (and bundled inside the release
+	// tarballs) but is never published as a standalone release asset, so a
+	// releases/download/<tag>/install-online.sh URL 404s. Fetch the script from
+	// raw.githubusercontent at the matching ref instead; the --version below
+	// still points install-online.sh at the real per-tag tarball asset.
+	ref := releaseTag
+	if ref == "latest" {
+		ref = "master"
 	}
+	scriptURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/scripts/install-online.sh", repo, ref)
 	return fmt.Sprintf(
 		"#!/usr/bin/env bash\nset -euo pipefail\ncurl -fsSL %s \\\n  | sudo bash -s -- --role slave --version %s -- \\\n      --node-id %s --master-addr %s --token %s\n",
 		shellQuote(scriptURL), shellQuote(releaseTag), shellQuote(nodeID), shellQuote(masterAddr), shellQuote(token),

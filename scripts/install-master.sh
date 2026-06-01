@@ -168,6 +168,7 @@ find_file() {
   for candidate in \
     "$ROOT_DIR/$target" \
     "$ROOT_DIR/systemd/$(basename "$target")" \
+    "$ROOT_DIR/sudoers/$(basename "$target")" \
     "$ROOT_DIR/dist/linux-amd64/$target" \
     "$ROOT_DIR/dist/linux-arm64/$target"
   do
@@ -181,6 +182,7 @@ find_file() {
 
 BIN_SOURCE=$(find_binary || true)
 SERVICE_SOURCE=$(find_file "packaging/systemd/nut-master.service" || true)
+SUDOERS_SOURCE=$(find_file "packaging/sudoers/nut-server-master" || true)
 
 if [ -z "$BIN_SOURCE" ]; then
   echo "nut-master binary not found near script"
@@ -207,6 +209,17 @@ install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
 chown -R nut-server:nut-server /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-master
 
+# Install the master sudoers entry so an opt-in local_shutdown (master powers
+# itself off last) can run /sbin/shutdown as the non-root nut-server user.
+if [ -n "$SUDOERS_SOURCE" ]; then
+  install -o root -g root -m 0440 "$SUDOERS_SOURCE" /etc/sudoers.d/nut-server-master
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -c -f /etc/sudoers.d/nut-server-master >/dev/null
+  fi
+else
+  echo "warning: master sudoers file not found; local_shutdown will need manual sudo setup" >&2
+fi
+
 random_token() {
   head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32
 }
@@ -214,7 +227,12 @@ random_token() {
 CONFIG_PATH="/etc/nut-server/master.yaml"
 if [ -f "$CONFIG_PATH" ]; then
   echo "config $CONFIG_PATH already exists, skipping generation"
-  if ! grep -q '^admin_token:' "$CONFIG_PATH"; then
+  if grep -q '^admin_token:' "$CONFIG_PATH"; then
+    if [ -n "$ADMIN_TOKEN" ]; then
+      sed -i "s|^admin_token:.*|admin_token: \"$ADMIN_TOKEN\"|" "$CONFIG_PATH"
+      echo "rotated admin_token in existing master.yaml"
+    fi
+  else
     if [ -z "$ADMIN_TOKEN" ]; then
       ADMIN_TOKEN=$(random_token)
     fi

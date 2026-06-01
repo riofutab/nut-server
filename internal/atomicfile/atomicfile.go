@@ -8,7 +8,7 @@ import (
 
 func WriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("ensure dir %s: %w", dir, err)
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -39,6 +39,12 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		cleanup()
 		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
+	}
+	// fsync the parent directory so the rename itself is durable across a power
+	// loss — critical for software whose entire job is surviving power events.
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 	return nil
 }

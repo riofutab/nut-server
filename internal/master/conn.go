@@ -1,7 +1,7 @@
 package master
 
 import (
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +33,13 @@ func (s *Server) handleConn(conn net.Conn) {
 	if !security.ValidateToken(s.cfg.AuthTokens, register.Token) {
 		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: "invalid token"})
 		slog.Warn("reject slave: invalid token", "node_id", register.NodeID, "peer", conn.RemoteAddr().String())
+		recordRegisterAttempt("rejected")
+		return
+	}
+
+	if err := verifyPeerIdentity(conn, register.NodeID, s.cfg.TLS.BindNodeIDToCert); err != nil {
+		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: "client certificate identity mismatch"})
+		slog.Warn("reject slave: client cert identity mismatch", "node_id", register.NodeID, "peer", conn.RemoteAddr().String(), "err", err)
 		recordRegisterAttempt("rejected")
 		return
 	}
@@ -81,12 +88,8 @@ func (s *Server) readRegister(client *Client) (protocol.RegisterMessage, error) 
 	if env.Type != protocol.TypeRegister {
 		return protocol.RegisterMessage{}, fmt.Errorf("expected register message, got %s", env.Type)
 	}
-	payload, err := json.Marshal(env.Data)
-	if err != nil {
-		return protocol.RegisterMessage{}, fmt.Errorf("marshal register payload: %w", err)
-	}
 	var register protocol.RegisterMessage
-	if err := json.Unmarshal(payload, &register); err != nil {
+	if err := protocol.DecodePayload(env.Data, &register); err != nil {
 		return protocol.RegisterMessage{}, fmt.Errorf("decode register payload: %w", err)
 	}
 	if register.NodeID == "" {
@@ -98,20 +101,53 @@ func (s *Server) readRegister(client *Client) (protocol.RegisterMessage, error) 
 	return register, nil
 }
 
+// verifyPeerIdentity optionally binds the claimed node_id to the TLS client
+// certificate. When tls.bind_node_id_to_cert is enabled and the peer presents a
+// client certificate, the node_id must equal the certificate CommonName or one
+// of its DNS SANs — this stops any token holder from registering as (or forging
+// acks for) an arbitrary node_id under mTLS. It is opt-in so existing mTLS
+// deployments whose certificate CN is not the node_id keep working; plaintext
+// or token-only connections carry no cryptographic identity and remain
+// trust-on-first-use.
+func verifyPeerIdentity(conn net.Conn, nodeID string, enforce bool) error {
+	if !enforce {
+		return nil
+	}
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	certs := tlsConn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil
+	}
+	leaf := certs[0]
+	if leaf.Subject.CommonName == nodeID {
+		return nil
+	}
+	for _, name := range leaf.DNSNames {
+		if name == nodeID {
+			return nil
+		}
+	}
+	return fmt.Errorf("node_id %q does not match client certificate CN/SAN", nodeID)
+}
+
 func (s *Server) handleEnvelope(client *Client, env protocol.Envelope) error {
 	switch env.Type {
 	case protocol.TypePing:
 		client.Touch()
-		return nil
+		// Reply so the slave can detect a half-open connection: a slave that
+		// stops receiving pongs within its read deadline will reconnect.
+		return client.Send(protocol.TypePong, protocol.PongMessage{SentAt: time.Now().UTC()})
 	case protocol.TypeShutdownAck:
-		payload, err := json.Marshal(env.Data)
-		if err != nil {
-			return err
-		}
 		var ack protocol.ShutdownAckMessage
-		if err := json.Unmarshal(payload, &ack); err != nil {
+		if err := protocol.DecodePayload(env.Data, &ack); err != nil {
 			return err
 		}
+		// Bind the ack to the authenticated connection identity: a slave may
+		// only report status for itself, never forge acks for other nodes.
+		ack.NodeID = client.NodeID
 		s.recordShutdownUpdate(ack)
 		recordShutdownAck(ack.Status)
 		slog.Info("shutdown update",

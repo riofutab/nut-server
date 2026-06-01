@@ -1,5 +1,6 @@
 node_id: "slave-01"
-master_addr: "192.168.1.2:9000"
+# 改成你的 master 地址(host:port)。这是占位值,不要直接使用。
+master_addr: "master.example:9000"
 token: "replace-with-strong-token"
 tags:
   - "web"

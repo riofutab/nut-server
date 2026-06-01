@@ -57,7 +57,7 @@ tls:
 	}
 }
 
-func TestLoadMasterConfigDisabledTLSIgnoresCertificateFields(t *testing.T) {
+func TestLoadMasterConfigRejectsDisabledTLSWithCertFields(t *testing.T) {
 	configPath := writeConfigFile(t, `
 listen_addr: ":9000"
 admin_token: "admin-secret"
@@ -72,9 +72,26 @@ tls:
   require_client_cert: true
 `)
 
+	if _, err := LoadMasterConfig(configPath); err == nil {
+		t.Fatalf("expected tls.disabled combined with cert fields to be rejected")
+	}
+}
+
+func TestLoadMasterConfigDisabledTLSAloneForcesPlaintext(t *testing.T) {
+	configPath := writeConfigFile(t, `
+listen_addr: ":9000"
+admin_token: "admin-secret"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+tls:
+  disabled: true
+`)
+
 	cfg, err := LoadMasterConfig(configPath)
 	if err != nil {
-		t.Fatalf("expected disabled TLS to bypass certificate validation, got %v", err)
+		t.Fatalf("expected lone tls.disabled to load, got %v", err)
 	}
 	if cfg.TLS.EnabledForServer() {
 		t.Fatalf("expected disabled TLS to force plain listener")
@@ -215,7 +232,7 @@ local_shutdown:
 	}
 }
 
-func TestLoadSlaveConfigDisabledTLSIgnoresCertificateFields(t *testing.T) {
+func TestLoadSlaveConfigRejectsDisabledTLSWithCertFields(t *testing.T) {
 	configPath := writeConfigFile(t, `
 node_id: "slave-01"
 master_addr: "127.0.0.1:9000"
@@ -228,9 +245,23 @@ tls:
   insecure_skip_verify: true
 `)
 
+	if _, err := LoadSlaveConfig(configPath); err == nil {
+		t.Fatalf("expected tls.disabled combined with cert fields to be rejected")
+	}
+}
+
+func TestLoadSlaveConfigDisabledTLSAloneForcesPlaintext(t *testing.T) {
+	configPath := writeConfigFile(t, `
+node_id: "slave-01"
+master_addr: "127.0.0.1:9000"
+token: "secret-token"
+tls:
+  disabled: true
+`)
+
 	cfg, err := LoadSlaveConfig(configPath)
 	if err != nil {
-		t.Fatalf("expected disabled TLS to bypass client TLS validation, got %v", err)
+		t.Fatalf("expected lone tls.disabled to load, got %v", err)
 	}
 	if cfg.TLS.EnabledForClient() {
 		t.Fatalf("expected disabled TLS to force plain dialing")

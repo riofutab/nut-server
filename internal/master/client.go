@@ -62,15 +62,7 @@ func (c *Client) SetReadDeadline(timeout time.Duration) error {
 }
 
 func (c *Client) ReadEnvelope() (protocol.Envelope, error) {
-	line, err := c.reader.ReadBytes('\n')
-	if err != nil {
-		return protocol.Envelope{}, err
-	}
-	var env protocol.Envelope
-	if err := json.Unmarshal(line, &env); err != nil {
-		return protocol.Envelope{}, fmt.Errorf("decode envelope: %w", err)
-	}
-	return env, nil
+	return protocol.ReadEnvelope(c.reader)
 }
 
 func (c *Client) Touch() {
@@ -88,4 +80,3 @@ func (c *Client) LastSeen() time.Time {
 func (c *Client) Close() error {
 	return c.Conn.Close()
 }
-

@@ -57,7 +57,16 @@ func getInt(client *gosnmp.GoSNMP, oid string) (int, error) {
 	if len(packet.Variables) != 1 {
 		return 0, fmt.Errorf("unexpected variable count for oid %s", oid)
 	}
-	value := gosnmp.ToBigInt(packet.Variables[0].Value)
+	variable := packet.Variables[0]
+	// An SNMP exception varbind (unsupported/typo'd OID) decodes to a non-nil
+	// big.Int(0) via ToBigInt, which would otherwise be read as a genuine 0 and
+	// misinterpreted as a critically low charge/runtime. Reject it as an error
+	// so a misconfigured OID surfaces a poll failure instead of a false reading.
+	switch variable.Type {
+	case gosnmp.NoSuchObject, gosnmp.NoSuchInstance, gosnmp.EndOfMibView:
+		return 0, fmt.Errorf("oid %s not available on device (%v)", oid, variable.Type)
+	}
+	value := gosnmp.ToBigInt(variable.Value)
 	if value == nil {
 		return 0, fmt.Errorf("oid %s has empty value", oid)
 	}

@@ -122,13 +122,53 @@ func TestReplayPendingShutdownSkipsTerminalNodes(t *testing.T) {
 	}
 }
 
-func TestReplayPendingShutdownSkipsUntargetedNodes(t *testing.T) {
+func TestReplayPendingShutdownAdoptsUntargetedNodeForAllTarget(t *testing.T) {
+	// An "all"-target command must reach a node that was offline at the trigger
+	// instant and reconnects later: it is adopted into the target set and gets
+	// the replay rather than silently riding out the outage.
 	server := NewServer(config.MasterConfig{})
 	message := protocol.ShutdownMessage{
 		CommandID: "shutdown-1",
 		Reason:    "battery low",
 		IssuedAt:  time.Now().UTC(),
 		Target:    protocol.ShutdownTarget{All: true},
+	}
+	server.rememberShutdownCommand(message, []*Client{{NodeID: "node-1"}})
+	server.shutdownIssued.Store(true)
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+
+	client := NewClient(conn)
+	client.NodeID = "node-2"
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.replayPendingShutdown(client)
+	}()
+
+	env := readEnvelopeFromConn(t, peer)
+	if err := <-errCh; err != nil {
+		t.Fatalf("replay pending shutdown: %v", err)
+	}
+	if env.Type != protocol.TypeShutdown {
+		t.Fatalf("expected shutdown envelope for adopted all-target node, got %s", env.Type)
+	}
+	if _, ok := server.commands["shutdown-1"].TargetNodes["node-2"]; !ok {
+		t.Fatalf("expected node-2 to be adopted into the all-target command")
+	}
+}
+
+func TestReplayPendingShutdownSkipsUntargetedNodeForSpecificTarget(t *testing.T) {
+	// A command targeting specific nodes (not "all") must NOT leak to a node
+	// that was never targeted.
+	server := NewServer(config.MasterConfig{})
+	message := protocol.ShutdownMessage{
+		CommandID: "shutdown-1",
+		Reason:    "battery low",
+		IssuedAt:  time.Now().UTC(),
+		Target:    protocol.ShutdownTarget{NodeIDs: []string{"node-1"}},
 	}
 	server.rememberShutdownCommand(message, []*Client{{NodeID: "node-1"}})
 	server.shutdownIssued.Store(true)

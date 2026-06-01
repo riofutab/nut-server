@@ -34,6 +34,12 @@ func (s *Server) evaluateUPS() error {
 	}
 	s.recordUPSSuccess(status, polledAt)
 	recordUPSPollResult(true)
+	if !status.OnBattery {
+		// Line power restored: end the current on-battery episode so the next
+		// independent outage can auto-trigger again, and release a completed
+		// command that would otherwise pin activeCommand forever.
+		s.clearAutoShutdownLatchOnLinePower()
+	}
 	match, triggered := EvaluatePolicies(status, s.cfg.ShutdownPolicies)
 	if !triggered {
 		return nil

@@ -75,7 +75,7 @@ func TestRenderInstallScriptShape(t *testing.T) {
 	wants := []string{
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
-		"https://github.com/riofutab/nut-server/releases/download/v0.2.1/install-online.sh",
+		"https://raw.githubusercontent.com/riofutab/nut-server/v0.2.1/scripts/install-online.sh",
 		"--role slave",
 		"--version 'v0.2.1'",
 		"--node-id 'slave-01'",

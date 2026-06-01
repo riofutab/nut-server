@@ -27,10 +27,11 @@ copy_common_files() {
 copy_master_files() {
   src_dir="$1"
   stage_dir="$2"
-  mkdir -p "$stage_dir/bin" "$stage_dir/configs" "$stage_dir/systemd" "$stage_dir/scripts"
+  mkdir -p "$stage_dir/bin" "$stage_dir/configs" "$stage_dir/systemd" "$stage_dir/scripts" "$stage_dir/sudoers"
   cp "$src_dir/nut-master" "$stage_dir/bin/nut-master"
   cp "$src_dir/configs/master.example.yaml" "$stage_dir/configs/master.example.yaml"
   cp "$src_dir/packaging/systemd/nut-master.service" "$stage_dir/systemd/nut-master.service"
+  cp "$src_dir/packaging/sudoers/nut-server-master" "$stage_dir/sudoers/nut-server-master"
   cp "$src_dir/scripts/install-master.sh" "$stage_dir/scripts/install-master.sh"
   cp "$src_dir/scripts/quick-install-master.sh" "$stage_dir/scripts/quick-install-master.sh"
   cp "$src_dir/scripts/install-online.sh" "$stage_dir/scripts/install-online.sh"

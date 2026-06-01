@@ -95,7 +95,10 @@ func (s *Server) normalizeLoadedLocalShutdown() {
 		return
 	}
 	command, ok := s.commands[s.localShutdown.CommandID]
-	if !ok || s.activeCommand != s.localShutdown.CommandID || command.ReplayDisabled {
+	// Keep a pending local shutdown even if activeCommand was already cleared on
+	// completion before the restart — the watcher still needs to power the
+	// master off. Only an absent or reset command cancels it.
+	if !ok || command.ReplayDisabled {
 		s.localShutdown = nil
 	}
 }

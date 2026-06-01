@@ -1,0 +1,16 @@
+# Allow the nut-server user (running nut-master) to execute approved
+# shutdown invocations without a password, used only when local_shutdown is
+# enabled so the master can power itself off last. Each command is pinned to a
+# specific argv. The trailing "" forbids any additional arguments, so a
+# compromised nut-master process cannot e.g. `shutdown -c` to cancel the
+# legitimate UPS shutdown or schedule far-future actions.
+Cmnd_Alias NUT_MASTER_SHUTDOWN = \
+    /sbin/shutdown -h now "", \
+    /usr/sbin/shutdown -h now "", \
+    /sbin/shutdown -P now "", \
+    /usr/sbin/shutdown -P now "", \
+    /sbin/poweroff "", \
+    /usr/sbin/poweroff "", \
+    /bin/systemctl poweroff "", \
+    /usr/bin/systemctl poweroff ""
+nut-server ALL=(root) NOPASSWD: NUT_MASTER_SHUTDOWN

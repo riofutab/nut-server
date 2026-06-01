@@ -45,12 +45,18 @@ shutdown_policy:
 #     reason: "runtime critical"
 local_shutdown:
   enabled: false
+  # master 以非 root 的 nut-server 用户运行,需经 sudo 关机(包内随附
+  # /etc/sudoers.d/nut-server-master 精确放行该 argv)。
   command:
+    - "/usr/bin/sudo"
+    - "-n"
     - "/sbin/shutdown"
     - "-h"
     - "now"
   max_wait: "15m"
-  emergency_runtime_minutes: 15
+  # 紧急阈值应低于 shutdown_policy.min_runtime_minutes(默认 15),否则刚进入
+  # 等待远端阶段就会立即自关,失去"最后关 master"的意义。
+  emergency_runtime_minutes: 5
 snmp:
   target: "192.168.1.10"
   port: 161

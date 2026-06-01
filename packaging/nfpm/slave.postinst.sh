@@ -18,6 +18,9 @@ fi
 
 if [ ! -f /etc/nut-server/slave.yaml ]; then
   cp /etc/nut-server/slave.example.yaml /etc/nut-server/slave.yaml
+  # Use an absolute, sandbox-writable state path (the relative example default is
+  # read-only under the shipped systemd ProtectSystem=strict).
+  sed -i 's|^state_file:.*|state_file: "/var/lib/nut-server/slave-state.json"|' /etc/nut-server/slave.yaml
   chown nut-server:nut-server /etc/nut-server/slave.yaml
   chmod 0640 /etc/nut-server/slave.yaml
 fi

@@ -6,6 +6,7 @@ const (
 	TypeRegister    = "register"
 	TypeRegisterAck = "register_ack"
 	TypePing        = "ping"
+	TypePong        = "pong"
 	TypeShutdown    = "shutdown"
 	TypeShutdownAck = "shutdown_ack"
 	TypeError       = "error"
@@ -37,6 +38,10 @@ type RegisterAckMessage struct {
 }
 
 type PingMessage struct {
+	SentAt time.Time `json:"sent_at"`
+}
+
+type PongMessage struct {
 	SentAt time.Time `json:"sent_at"`
 }
 

@@ -214,6 +214,12 @@ func (s *Server) recordShutdownUpdate(update protocol.ShutdownAckMessage) {
 		s.commandMu.Unlock()
 		return
 	}
+	if _, isTarget := command.TargetNodes[update.NodeID]; !isTarget {
+		// Ignore acks for nodes that were never part of this command, so a
+		// stale or fabricated node_id cannot pollute per-command state.
+		s.commandMu.Unlock()
+		return
+	}
 	if existing, exists := command.NodeUpdates[update.NodeID]; exists && !shouldReplaceShutdownUpdate(existing, update) {
 		s.commandMu.Unlock()
 		return
@@ -264,6 +270,32 @@ func (s *Server) ResetActiveCommand() {
 	s.autoShutdownLatched = false
 	s.shutdownIssued.Store(false)
 	s.saveStateLocked()
+}
+
+// clearAutoShutdownLatchOnLinePower releases the per-episode auto-shutdown
+// latch when the UPS reports line power, and clears a fully-completed active
+// command. Without this, the latch set on the first outage stays forever (the
+// master never auto-shuts down again) and a command whose only outstanding
+// target timed out keeps activeCommand pinned, blocking all future shutdowns
+// until a manual /commands/reset.
+func (s *Server) clearAutoShutdownLatchOnLinePower() {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	changed := false
+	if s.autoShutdownLatched {
+		s.autoShutdownLatched = false
+		changed = true
+	}
+	if s.activeCommand != "" {
+		if command, ok := s.commands[s.activeCommand]; ok && commandComplete(command) {
+			s.activeCommand = ""
+			s.shutdownIssued.Store(false)
+			changed = true
+		}
+	}
+	if changed {
+		s.saveStateLocked()
+	}
 }
 
 func (s *Server) commandSummary(commandID string) protocol.CommandSummary {
@@ -356,7 +388,21 @@ func (s *Server) replayableShutdownForNode(nodeID string) (protocol.ShutdownMess
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 
-	if command, ok := s.commands[s.activeCommand]; ok && shouldReplayShutdownForNode(command, nodeID) {
+	command, ok := s.commands[s.activeCommand]
+	if !ok {
+		return protocol.ShutdownMessage{}, false
+	}
+	// An "all"-target command must reach every node that is up while it is the
+	// active command, including a slave that was offline at the trigger instant
+	// and reconnects later. Adopt the reconnecting node into the target set so
+	// it receives the replay and is tracked to completion.
+	if command.Message.Target.All && !command.ReplayDisabled {
+		if _, already := command.TargetNodes[nodeID]; !already {
+			command.TargetNodes[nodeID] = struct{}{}
+			s.saveStateLocked()
+		}
+	}
+	if shouldReplayShutdownForNode(command, nodeID) {
 		return command.Message, true
 	}
 	return protocol.ShutdownMessage{}, false
@@ -402,7 +448,11 @@ func shouldReplayShutdownForNode(command *shutdownCommandState, nodeID string) b
 	if _, wasTarget := command.TargetNodes[nodeID]; !wasTarget {
 		return false
 	}
-	if update, ok := command.NodeUpdates[nodeID]; ok && isFinalShutdownStatus(update.Status) {
+	// Replay until the node reports a SUCCESSFUL shutdown. A Failed (or Timeout)
+	// status is not terminal for replay purposes, so a transiently-failed
+	// shutdown is retried on the next reconnect/rebroadcast instead of leaving
+	// the node powered on through the outage.
+	if update, ok := command.NodeUpdates[nodeID]; ok && update.Status == protocol.ShutdownStatusExecuted {
 		return false
 	}
 	return true

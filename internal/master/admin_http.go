@@ -92,14 +92,29 @@ func (s *Server) handleManualShutdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	message, summary, err := s.TriggerShutdown(request)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err != nil && message.CommandID == "" {
+		// Rejected before any command was created (no matching targets, or a
+		// shutdown is already active).
+		status := http.StatusBadRequest
+		if errors.Is(err, errShutdownAlreadyActive) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
+	response := map[string]interface{}{
 		"message": message,
 		"status":  summary,
-	})
+	}
+	if err != nil {
+		// The command was created, persisted and delivered to every reachable
+		// slave, but at least one delivery failed. Report partial success so the
+		// operator does not mistake an issued shutdown for a rejected one.
+		response["delivery_error"] = err.Error()
+		writeJSON(w, http.StatusMultiStatus, response)
+		return
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {

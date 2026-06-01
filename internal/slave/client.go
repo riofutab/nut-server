@@ -27,16 +27,21 @@ const (
 	pingInterval            = 15 * time.Second
 	maxReconnectInterval    = 60 * time.Second
 	backoffJitterFactor     = 0.2
+	// readIdleTimeout bounds the steady-state read so a half-open master
+	// connection (no RST, e.g. master host crash) is detected: the master pongs
+	// every ping, so missing reads for longer than this means the link is dead.
+	// Must exceed pingInterval so a healthy connection never times out.
+	readIdleTimeout = 3 * pingInterval
 )
 
 type Client struct {
-	cfg               config.SlaveConfig
-	hostname          string
-	shutdown          ShutdownExecutor
-	commandMu         sync.Mutex
-	commandStates     map[string]protocol.ShutdownAckMessage
-	executions        map[string]*shutdownExecution
-	tlsConfig         *tls.Config
+	cfg           config.SlaveConfig
+	hostname      string
+	shutdown      ShutdownExecutor
+	commandMu     sync.Mutex
+	commandStates map[string]protocol.ShutdownAckMessage
+	executions    map[string]*shutdownExecution
+	tlsConfig     *tls.Config
 }
 
 type shutdownExecution struct {
@@ -72,12 +77,13 @@ func (c *Client) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
-		err := c.runOnce(ctx)
-		if err != nil {
+		// Reset the backoff once a connection reaches steady state (successful
+		// register), not on runOnce's return: runOnce only ever returns an
+		// error, so the old err==nil reset was dead code and the delay grew
+		// monotonically to the cap over the slave's lifetime.
+		resetBackoff := func() { delay = c.cfg.ReconnectInterval.Duration }
+		if err := c.runOnce(ctx, resetBackoff); err != nil {
 			slog.Warn("slave connection ended", "master", c.cfg.MasterAddr, "node_id", c.cfg.NodeID, "err", err)
-		}
-		if err == nil {
-			delay = c.cfg.ReconnectInterval.Duration
 		}
 		if !sleepWithContext(ctx, jitterDuration(delay)) {
 			return nil
@@ -151,7 +157,7 @@ func (c *Client) dial() (net.Conn, error) {
 	return tls.Dial("tcp", c.cfg.MasterAddr, c.tlsConfig)
 }
 
-func (c *Client) runOnce(parentCtx context.Context) error {
+func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 	conn, err := c.dial()
 	if err != nil {
 		recordConnectAttempt("dial_error")
@@ -176,10 +182,10 @@ func (c *Client) runOnce(parentCtx context.Context) error {
 		recordConnectAttempt("register_error")
 		return err
 	}
-	session.setReadDeadline(0)
 	recordConnectAttempt("success")
 	setConnected(true)
 	defer setConnected(false)
+	onRegistered()
 	slog.Info("registered to master",
 		"master", c.cfg.MasterAddr,
 		"node_id", c.cfg.NodeID,
@@ -195,6 +201,7 @@ func (c *Client) runOnce(parentCtx context.Context) error {
 	}()
 
 	for {
+		session.setReadDeadline(readIdleTimeout)
 		env, err := readEnvelope(session.reader)
 		if err != nil {
 			return err
@@ -239,7 +246,9 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 				return err
 			}
 			switch existing.Status {
-			case protocol.ShutdownStatusAccepted:
+			case protocol.ShutdownStatusAccepted, protocol.ShutdownStatusFailed:
+				// Retry a previously-failed shutdown when the master replays it,
+				// so a transient failure does not leave the node powered on.
 				return c.resumeShutdown(shutdown, session)
 			case protocol.ShutdownStatusExecuting:
 				if !shouldStartExecution {
@@ -265,6 +274,9 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 			return err
 		}
 		return c.resumeShutdown(shutdown, session)
+	case protocol.TypePong:
+		// Liveness reply to our ping; receiving it refreshes the read deadline.
+		return nil
 	case protocol.TypeError:
 		var msg protocol.ErrorMessage
 		if err := decodePayload(env.Data, &msg); err != nil {
@@ -401,23 +413,11 @@ func (c *Client) shutdownExecutionSession(commandID string) *connectionSession {
 }
 
 func readEnvelope(reader *bufio.Reader) (protocol.Envelope, error) {
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		return protocol.Envelope{}, err
-	}
-	var env protocol.Envelope
-	if err := json.Unmarshal(line, &env); err != nil {
-		return protocol.Envelope{}, err
-	}
-	return env, nil
+	return protocol.ReadEnvelope(reader)
 }
 
 func decodePayload(data interface{}, dst interface{}) error {
-	payload, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(payload, dst)
+	return protocol.DecodePayload(data, dst)
 }
 
 func newConnectionSession(conn net.Conn) *connectionSession {

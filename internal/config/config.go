@@ -3,42 +3,43 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type MasterConfig struct {
-	ListenAddr      string         `yaml:"listen_addr"`
-	AdminListenAddr string         `yaml:"admin_listen_addr"`
-	AdminToken      string         `yaml:"admin_token"`
-	PublicAddr      string         `yaml:"public_addr"`
-	InstallRepo     string         `yaml:"install_repo"`
-	StateFile       string         `yaml:"state_file"`
-	AuthTokens      []string       `yaml:"auth_tokens"`
-	PollInterval    Duration       `yaml:"poll_interval"`
-	CommandTimeout  Duration       `yaml:"command_timeout"`
-	OfflineAfter    Duration       `yaml:"offline_after"`
-	DryRun          bool           `yaml:"dry_run"`
-	LogUPSStatus    bool           `yaml:"log_ups_status"`
-	TLS             TLSConfig      `yaml:"tls"`
-	LocalShutdown   LocalShutdownConfig `yaml:"local_shutdown"`
-	ShutdownPolicy   ShutdownPolicy   `yaml:"shutdown_policy"`
+	ListenAddr       string               `yaml:"listen_addr"`
+	AdminListenAddr  string               `yaml:"admin_listen_addr"`
+	AdminToken       string               `yaml:"admin_token"`
+	PublicAddr       string               `yaml:"public_addr"`
+	InstallRepo      string               `yaml:"install_repo"`
+	StateFile        string               `yaml:"state_file"`
+	AuthTokens       []string             `yaml:"auth_tokens"`
+	PollInterval     Duration             `yaml:"poll_interval"`
+	CommandTimeout   Duration             `yaml:"command_timeout"`
+	OfflineAfter     Duration             `yaml:"offline_after"`
+	DryRun           bool                 `yaml:"dry_run"`
+	LogUPSStatus     bool                 `yaml:"log_ups_status"`
+	TLS              TLSConfig            `yaml:"tls"`
+	LocalShutdown    LocalShutdownConfig  `yaml:"local_shutdown"`
+	ShutdownPolicy   ShutdownPolicy       `yaml:"shutdown_policy"`
 	ShutdownPolicies []ShutdownPolicySpec `yaml:"shutdown_policies"`
-	SNMP             SNMPConfig       `yaml:"snmp"`
+	SNMP             SNMPConfig           `yaml:"snmp"`
 }
 
 type ShutdownPolicySpec struct {
-	Name   string             `yaml:"name"`
-	When   ShutdownPolicyWhen `yaml:"when"`
+	Name   string               `yaml:"name"`
+	When   ShutdownPolicyWhen   `yaml:"when"`
 	Target ShutdownPolicyTarget `yaml:"target"`
-	Reason string             `yaml:"reason"`
+	Reason string               `yaml:"reason"`
 }
 
 type ShutdownPolicyWhen struct {
-	OnBattery     *bool `yaml:"on_battery"`
-	ChargeBelow   int   `yaml:"charge_below"`
-	RuntimeBelow  int   `yaml:"runtime_below"`
+	OnBattery    *bool `yaml:"on_battery"`
+	ChargeBelow  int   `yaml:"charge_below"`
+	RuntimeBelow int   `yaml:"runtime_below"`
 }
 
 type ShutdownPolicyTarget struct {
@@ -96,6 +97,10 @@ type TLSConfig struct {
 	ServerName         string `yaml:"server_name"`
 	RequireClientCert  bool   `yaml:"require_client_cert"`
 	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+	// BindNodeIDToCert, when true, requires a registering slave's node_id to
+	// match its client certificate CommonName or a DNS SAN (mTLS only). Opt-in
+	// so existing deployments whose cert CN is not the node_id are unaffected.
+	BindNodeIDToCert bool `yaml:"bind_node_id_to_cert"`
 }
 
 type Duration struct {
@@ -150,6 +155,9 @@ func (c TLSConfig) EnabledForClient() bool {
 
 func (c TLSConfig) ValidateServer() error {
 	if c.Disabled {
+		if c.Enabled || c.CertFile != "" || c.KeyFile != "" || c.CAFile != "" || c.RequireClientCert {
+			return fmt.Errorf("tls.disabled cannot be combined with other tls.* settings; remove disabled or clear enabled/cert_file/key_file/ca_file/require_client_cert")
+		}
 		return nil
 	}
 	if !c.EnabledForServer() {
@@ -169,6 +177,9 @@ func (c TLSConfig) ValidateServer() error {
 
 func (c TLSConfig) ValidateClient() error {
 	if c.Disabled {
+		if c.Enabled || c.CertFile != "" || c.KeyFile != "" || c.CAFile != "" || c.ServerName != "" || c.InsecureSkipVerify {
+			return fmt.Errorf("tls.disabled cannot be combined with other tls.* settings; remove disabled or clear enabled/cert_file/key_file/ca_file/server_name/insecure_skip_verify")
+		}
 		return nil
 	}
 	if !c.EnabledForClient() {
@@ -203,8 +214,16 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if len(cfg.AuthTokens) == 0 {
 		return MasterConfig{}, fmt.Errorf("auth_tokens must not be empty")
 	}
+	for i, token := range cfg.AuthTokens {
+		if err := validateSecret(fmt.Sprintf("auth_tokens[%d]", i), token); err != nil {
+			return MasterConfig{}, err
+		}
+	}
 	if cfg.AdminToken == "" {
 		return MasterConfig{}, fmt.Errorf("admin_token must not be empty")
+	}
+	if err := validateSecret("admin_token", cfg.AdminToken); err != nil {
+		return MasterConfig{}, err
 	}
 	if cfg.PollInterval.Duration == 0 {
 		cfg.PollInterval.Duration = 10 * time.Second
@@ -244,6 +263,15 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	}
 	if cfg.SNMP.TimeoutSeconds == 0 {
 		cfg.SNMP.TimeoutSeconds = 2
+	}
+	if cfg.SNMP.OutputSourceOID == "" {
+		cfg.SNMP.OutputSourceOID = ".1.3.6.1.2.1.33.1.4.1.0"
+	}
+	if cfg.SNMP.ChargeOID == "" {
+		cfg.SNMP.ChargeOID = ".1.3.6.1.2.1.33.1.2.4.0"
+	}
+	if cfg.SNMP.RuntimeMinutesOID == "" {
+		cfg.SNMP.RuntimeMinutesOID = ".1.3.6.1.2.1.33.1.2.3.0"
 	}
 	if cfg.ShutdownPolicy.ShutdownReason == "" {
 		cfg.ShutdownPolicy.ShutdownReason = "UPS battery threshold reached"
@@ -306,6 +334,9 @@ func LoadSlaveConfig(path string) (SlaveConfig, error) {
 	if cfg.Token == "" {
 		return SlaveConfig{}, fmt.Errorf("token must not be empty")
 	}
+	if err := validateSecret("token", cfg.Token); err != nil {
+		return SlaveConfig{}, err
+	}
 	if cfg.ReconnectInterval.Duration == 0 {
 		cfg.ReconnectInterval.Duration = 5 * time.Second
 	}
@@ -319,6 +350,24 @@ func LoadSlaveConfig(path string) (SlaveConfig, error) {
 		cfg.ShutdownCommand = []string{"/sbin/shutdown", "-h", "now"}
 	}
 	return cfg, nil
+}
+
+// placeholderSecrets are the example values shipped in configs/*.example.yaml.
+// Refusing them at load time stops a copied-but-unedited config from running
+// with publicly-known, fleet-wide credentials.
+var placeholderSecrets = map[string]struct{}{
+	"replace-with-strong-token":       {},
+	"replace-with-strong-admin-token": {},
+}
+
+func validateSecret(field, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s must not be blank", field)
+	}
+	if _, ok := placeholderSecrets[value]; ok {
+		return fmt.Errorf("%s is still the example placeholder %q; set a strong unique secret", field, value)
+	}
+	return nil
 }
 
 func loadYAML(path string, dst interface{}) error {

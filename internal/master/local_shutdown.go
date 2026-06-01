@@ -47,13 +47,27 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 	switch state.Phase {
 	case protocol.LocalShutdownPhaseWaitingRemote:
 		command, ok := s.commands[state.CommandID]
-		if !ok || s.activeCommand != state.CommandID || command.ReplayDisabled {
+		// Do NOT discard merely because activeCommand was cleared on completion:
+		// recordShutdownUpdate clears activeCommand and unlocks before starting
+		// local shutdown, and this watcher must not nil the state in that gap
+		// (which would leave the master running on a dying battery). Only an
+		// absent or reset (ReplayDisabled) command cancels local shutdown.
+		if !ok || command.ReplayDisabled {
 			s.localShutdown = nil
 			s.saveStateLocked()
 			s.commandMu.Unlock()
 			return
 		}
-		if upsStatus != nil && upsStatus.RuntimeMinutes > 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes {
+		switch {
+		case remoteShutdownFinished(command):
+			// Backstop for the recordShutdownUpdate race: independently drive
+			// the master power-off once every remote node is done. Idempotent
+			// via beginLocalShutdownExecution's phase guard.
+			state.Trigger = protocol.LocalShutdownTriggerRemoteComplete
+			commandID = state.CommandID
+			trigger = state.Trigger
+			s.saveStateLocked()
+		case upsStatus != nil && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes:
 			rebroadcastAt := now
 			state.Phase = protocol.LocalShutdownPhaseEmergency
 			state.Trigger = protocol.LocalShutdownTriggerEmergencyRuntime
@@ -63,7 +77,7 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 			replay = command.Message
 			replayNodes = replayableNodeIDs(command)
 			s.saveStateLocked()
-		} else if state.DeadlineAt != nil && !now.Before(*state.DeadlineAt) {
+		case state.DeadlineAt != nil && !now.Before(*state.DeadlineAt):
 			state.Phase = protocol.LocalShutdownPhaseWaitExpired
 			state.Trigger = protocol.LocalShutdownTriggerWaitExpired
 			commandID = state.CommandID

@@ -8,6 +8,28 @@
 
 尚无未发布改动。
 
+## [0.4.0] - 2026-06-01
+
+健壮性 / 安全硬化版本,来自一轮架构师视角的逐行 review。**无破坏性配置改动**,但默认值收紧、占位 token 改为 fail-closed。
+
+### Security
+- **协议层无界读 DoS**: master / slave 共用 `protocol.ReadEnvelope`,单条 envelope 上限 1 MiB,认证前发超长行不再能 OOM 进程。
+- **ack 身份绑定**: `shutdown_ack` 的 `node_id` 强制改写为连接已认证的 `NodeID`,认证 slave 无法替别的节点伪造关机状态。
+- **占位 secret fail-closed**: `auth_tokens` / `admin_token` / slave `token` 留空、纯空白或仍是示例占位串时拒绝启动。
+- **可选 mTLS 证书绑定** `tls.bind_node_id_to_cert` (默认 false): 开启后 `node_id` 必须匹配客户端证书 CN / SAN,挡住合法证书 + token 冒充任意节点。
+- **`tls.disabled` 与证书字段互斥**、`atomicfile` 目录收到 `0700` 并 rename 后 fsync 父目录、随包附带钉死 argv 的 `/etc/sudoers.d/nut-server-master`。
+
+### Fixed
+- 市电恢复 (`!OnBattery`) 后清掉 auto-shutdown latch 与已完成的 activeCommand,latch 不再永久置位污染下次评估。
+- 本机自关机丢弃竞态:live watcher 与 reload 两条路径统一守卫 (`!ok || ReplayDisabled`)。
+- `all: true` 关机命令现在收编重连 / 新上线节点并 replay,不再漏关。
+- replay 只在 `executed` 终态跳过,`failed` / `timeout` 继续重试。
+- SNMP `NoSuchObject` / `NoSuchInstance` / `EndOfMibView` 当作错误,不再被读成 0 触发误关机。
+- slave 半开连接检测 (`readIdleTimeout` = 3× ping),注册成功后才复位退避;紧急关机阈值仅在续航读数 `>= 0` 时比较。
+- admin 手动关机部分下发失败返回 `207 Multi-Status`;`/install/slave` 脚本 URL 改用 `raw.githubusercontent.com` 修掉 404。
+
+[完整发布说明](.github/release-notes/v0.4.0.md)
+
 ## [0.3.0] - 2026-05-15
 
 聚焦可观测性、自动化与策略灵活度。
@@ -59,6 +81,7 @@ Patch 版本,**无功能性改动**。CI 基础设施升级 (Node 24 一系列 a
 
 v0.1.2 及更早的版本未维护独立 release notes。如果你在跑这些版本, 强烈建议升级到 v0.2.x 以上 (含安全相关收紧)。
 
+[0.4.0]: https://github.com/riofutab/nut-server/releases/tag/v0.4.0
 [0.3.0]: https://github.com/riofutab/nut-server/releases/tag/v0.3.0
 [0.2.1]: https://github.com/riofutab/nut-server/releases/tag/v0.2.1
 [0.2.0]: https://github.com/riofutab/nut-server/releases/tag/v0.2.0

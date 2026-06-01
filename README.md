@@ -44,7 +44,7 @@ flowchart LR
 
 每台 slave 通过 TCP/TLS 长连接挂在 master 上,断线自动指数 backoff 重连;master 收到 UPS 触发条件后按多策略合并出 target 集合,并发下发 shutdown,等远端 `executed` 回执后(可选)再关本机。
 
-仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.3.0](https://github.com/riofutab/nut-server/releases/tag/v0.3.0)。
+仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.4.0](https://github.com/riofutab/nut-server/releases/tag/v0.4.0)。
 
 UPS 读取默认按 UPS-MIB:`output_source_oid` 判断是否切到电池供电 · `charge_oid` 读取电量百分比 · `runtime_minutes_oid` 读取剩余分钟数。
 
