@@ -24,6 +24,7 @@ build_target() {
   cp "$ROOT_DIR/configs/slave.example.yaml" "$out_dir/configs/slave.example.yaml"
   cp "$ROOT_DIR/packaging/systemd/nut-master.service" "$out_dir/packaging/systemd/nut-master.service"
   cp "$ROOT_DIR/packaging/systemd/nut-slave.service" "$out_dir/packaging/systemd/nut-slave.service"
+  cp "$ROOT_DIR/packaging/sudoers/nut-server-master" "$out_dir/packaging/sudoers/nut-server-master"
   cp "$ROOT_DIR/packaging/sudoers/nut-server-slave" "$out_dir/packaging/sudoers/nut-server-slave"
   for script_name in \
     install-master.sh \
