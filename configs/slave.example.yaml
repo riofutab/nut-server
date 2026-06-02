@@ -23,3 +23,5 @@ shutdown_command:
   - "/sbin/shutdown"
   - "-h"
   - "now"
+# 关机命令最长执行时间,超时则杀掉并上报 failed(默认 2m),master 会择机重试。
+shutdown_command_timeout: "2m"

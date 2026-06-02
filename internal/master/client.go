@@ -2,7 +2,6 @@ package master
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"net"
 	"sync"
@@ -44,12 +43,8 @@ func (c *Client) Send(messageType string, payload interface{}) error {
 	defer c.mu.Unlock()
 
 	_ = c.Conn.SetWriteDeadline(time.Now().Add(WriteDeadline))
-	envelope := protocol.Envelope{Type: messageType, Data: payload}
-	if err := json.NewEncoder(c.writer).Encode(envelope); err != nil {
-		return fmt.Errorf("encode %s to %s: %w", messageType, c.NodeID, err)
-	}
-	if err := c.writer.Flush(); err != nil {
-		return fmt.Errorf("flush %s to %s: %w", messageType, c.NodeID, err)
+	if err := protocol.WriteEnvelope(c.writer, messageType, payload); err != nil {
+		return fmt.Errorf("send %s to %s: %w", messageType, c.NodeID, err)
 	}
 	return nil
 }

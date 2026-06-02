@@ -13,20 +13,7 @@ func (s *Server) Status() protocol.StatusResponse {
 	localShutdown := s.localShutdownStatusLocked()
 	commandCopy := make(map[string]*shutdownCommandState, len(s.commands))
 	for commandID, state := range s.commands {
-		copied := &shutdownCommandState{
-			Message:     state.Message,
-			TargetNodes: make(map[string]struct{}, len(state.TargetNodes)),
-			NodeUpdates: make(map[string]protocol.ShutdownAckMessage, len(state.NodeUpdates)),
-			TimeoutAt:   state.TimeoutAt,
-			CompletedAt: state.CompletedAt,
-		}
-		for nodeID := range state.TargetNodes {
-			copied.TargetNodes[nodeID] = struct{}{}
-		}
-		for nodeID, update := range state.NodeUpdates {
-			copied.NodeUpdates[nodeID] = update
-		}
-		commandCopy[commandID] = copied
+		commandCopy[commandID] = state.clone()
 	}
 	s.commandMu.Unlock()
 

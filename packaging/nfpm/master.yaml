@@ -35,6 +35,13 @@ contents:
     file_info:
       mode: 0440
 
+  # systemd unit sets WorkingDirectory here; the package must create it or
+  # `systemctl start` fails with status=200/CHDIR on a fresh install.
+  - dst: /usr/local/lib/nut-server
+    type: dir
+    file_info:
+      mode: 0755
+
   - dst: /etc/nut-server
     type: dir
     file_info:

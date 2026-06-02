@@ -8,6 +8,35 @@
 
 尚无未发布改动。
 
+## [0.5.0] - 2026-06-02
+
+运维就绪 / 健壮性版本,一轮 6 维度架构师 review 的 13 条优化全部落地。**完全向后兼容**:新增 config 字段都有安全默认值,新增端点 / 指标为纯增量。
+
+### Added
+- **健康探针 `/healthz` + `/readyz`**: master admin 口与 slave metrics 口均新增免鉴权端点;`/healthz` 进程存活即 200,master `/readyz` 反映监听就绪(未就绪 503),供 k8s / systemd / LB 探针使用。
+- **关机命令可配超时**: `local_shutdown.command_timeout`(master)/ `shutdown_command_timeout`(slave),默认 `2m`,经 `exec.CommandContext` 执行,挂死即杀并上报 `failed`,master 择机重试。
+- **SLI 指标**: `nut_master_shutdown_ack_latency_seconds`、`nut_master_ups_poll_duration_seconds`(Histogram)与 `nut_master_ups_last_success_timestamp_seconds` / `nut_master_ups_last_error_timestamp_seconds`(gauge)。
+
+### Changed
+- **状态持久化移出热锁**: 落盘 fsync 移出 `commandMu`,锁内只取带 `persistSeq` 的快照,解锁后在 `persistMu` 下写盘并防旧快照覆盖新快照;master / slave 同源。
+- **关机 fan-out 并发化**: `triggerShutdown` 改 per-target goroutine 并发,慢 / 半开 slave 不再拖累其余目标。
+- **优雅关闭排空在途连接**: master `Run` 退出时关闭在途连接并等所有 handler 收尾,连接 handler 的状态写不再落在 `Run` 返回之后。
+
+### Fixed
+- **`WorkingDirectory` 缺目录致启动失败**: nfpm 包现在创建 `/usr/local/lib/nut-server`,修掉用推荐路径安装后 `systemctl start` 报 `status=200/CHDIR` 的真缺陷(v0.4.0 及更早受影响)。
+- **`clone()` 漏拷 `ReplayDisabled`**: 状态快照 / `Status` 复制统一走 `clone()`,补回漏拷字段;关机状态分类收敛到单一 `status_class.go` 谓词表。
+- **ack 计数定序**: `nut_master_shutdown_acks_total` 在新状态对 `Status()` 可见前自增,消除"已 executed 但计数未动"的中间态。
+
+### Tests / CI
+- CI 单测 + e2e 全量 `-race`,新增 `FuzzReadEnvelope` fuzz smoke 步骤。
+- 新增 `verifyPeerIdentity` / `matchCertIdentity` 单测 + 真实 mTLS 握手测试、协议层 `ReadEnvelope` 单测与 fuzz、`normalizeLoadedLocalShutdown` 恢复路径测试。
+- 抽出 `protocol.WriteEnvelope`、slave `ackMessage` 工厂、master `writeJSONError` / `buildTargetNodeSet`,SNMP OID 改命名常量。
+
+### Docs
+- 新增 `docs/tls.md`(openssl 签发 CA + 证书 + `bind_node_id_to_cert`)与 `docs/troubleshooting.md`(按症状的排障 runbook);示例配置补超时字段说明。
+
+[完整发布说明](.github/release-notes/v0.5.0.md)
+
 ## [0.4.0] - 2026-06-01
 
 健壮性 / 安全硬化版本,来自一轮架构师视角的逐行 review。**无破坏性配置改动**,但默认值收紧、占位 token 改为 fail-closed。
@@ -81,6 +110,7 @@ Patch 版本,**无功能性改动**。CI 基础设施升级 (Node 24 一系列 a
 
 v0.1.2 及更早的版本未维护独立 release notes。如果你在跑这些版本, 强烈建议升级到 v0.2.x 以上 (含安全相关收紧)。
 
+[0.5.0]: https://github.com/riofutab/nut-server/releases/tag/v0.5.0
 [0.4.0]: https://github.com/riofutab/nut-server/releases/tag/v0.4.0
 [0.3.0]: https://github.com/riofutab/nut-server/releases/tag/v0.3.0
 [0.2.1]: https://github.com/riofutab/nut-server/releases/tag/v0.2.1

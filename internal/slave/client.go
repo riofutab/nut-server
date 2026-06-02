@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,6 +41,11 @@ type Client struct {
 	commandStates map[string]protocol.ShutdownAckMessage
 	executions    map[string]*shutdownExecution
 	tlsConfig     *tls.Config
+	// State persistence, mirroring the master: snapshot under commandMu, write
+	// under persistMu so the fsync never blocks command handling.
+	persistMu    sync.Mutex
+	persistSeq   uint64
+	persistedSeq uint64
 }
 
 type shutdownExecution struct {
@@ -95,6 +99,18 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) runMetricsServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(slavePromRegistry(), promhttp.HandlerOpts{}))
+	// Liveness: process is up. Readiness: the slave currently holds a registered
+	// connection to the master. Both unauthenticated, mirroring the master.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writePlain(w, http.StatusOK, "ok")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if slaveConnected.Load() {
+			writePlain(w, http.StatusOK, "ready")
+			return
+		}
+		writePlain(w, http.StatusServiceUnavailable, "not ready")
+	})
 	srv := &http.Server{Addr: c.cfg.MetricsListenAddr, Handler: mux}
 	go func() {
 		<-ctx.Done()
@@ -106,6 +122,12 @@ func (c *Client) runMetricsServer(ctx context.Context) {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("metrics server stopped", "err", err)
 	}
+}
+
+func writePlain(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body + "\n"))
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
@@ -230,6 +252,18 @@ func (c *Client) expectRegisterAck(reader *bufio.Reader) error {
 	return nil
 }
 
+// ackMessage builds a shutdown ack for this node; NodeID and AckedAt are
+// identical across every call site, so centralizing them avoids drift.
+func (c *Client) ackMessage(commandID, status, message string) protocol.ShutdownAckMessage {
+	return protocol.ShutdownAckMessage{
+		CommandID: commandID,
+		NodeID:    c.cfg.NodeID,
+		Status:    status,
+		Message:   message,
+		AckedAt:   time.Now().UTC(),
+	}
+}
+
 func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSession) error {
 	switch env.Type {
 	case protocol.TypeShutdown:
@@ -262,13 +296,7 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 		}
 
 		recordShutdownReceived()
-		accepted := protocol.ShutdownAckMessage{
-			CommandID: shutdown.CommandID,
-			NodeID:    c.cfg.NodeID,
-			Status:    protocol.ShutdownStatusAccepted,
-			Message:   "shutdown command accepted",
-			AckedAt:   time.Now().UTC(),
-		}
+		accepted := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusAccepted, "shutdown command accepted")
 		c.setCommandState(accepted)
 		if err := session.Send(protocol.TypeShutdownAck, accepted); err != nil {
 			return err
@@ -294,25 +322,13 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 			"command_id", shutdown.CommandID,
 			"node_id", c.cfg.NodeID,
 			"reason", shutdown.Reason)
-		executed := protocol.ShutdownAckMessage{
-			CommandID: shutdown.CommandID,
-			NodeID:    c.cfg.NodeID,
-			Status:    protocol.ShutdownStatusExecuted,
-			Message:   "dry-run shutdown simulated",
-			AckedAt:   time.Now().UTC(),
-		}
+		executed := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusExecuted, "dry-run shutdown simulated")
 		c.setCommandState(executed)
 		recordShutdownStatus(executed.Status)
 		return session.Send(protocol.TypeShutdownAck, executed)
 	}
 
-	executing := protocol.ShutdownAckMessage{
-		CommandID: shutdown.CommandID,
-		NodeID:    c.cfg.NodeID,
-		Status:    protocol.ShutdownStatusExecuting,
-		Message:   "executing shutdown command",
-		AckedAt:   time.Now().UTC(),
-	}
+	executing := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusExecuting, "executing shutdown command")
 	c.setCommandState(executing)
 	recordShutdownStatus(executing.Status)
 	if err := session.Send(protocol.TypeShutdownAck, executing); err != nil {
@@ -345,14 +361,14 @@ func (c *Client) runPingLoop(ctx context.Context, session *connectionSession, co
 func (c *Client) executeShutdown(commandID string, shutdown protocol.ShutdownMessage) {
 	defer c.finishShutdownExecution(commandID)
 
-	update := protocol.ShutdownAckMessage{
-		CommandID: shutdown.CommandID,
-		NodeID:    c.cfg.NodeID,
-		Status:    protocol.ShutdownStatusExecuted,
-		Message:   "shutdown command completed",
-		AckedAt:   time.Now().UTC(),
+	update := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusExecuted, "shutdown command completed")
+	ctx := context.Background()
+	if c.cfg.ShutdownCommandTimeout.Duration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.cfg.ShutdownCommandTimeout.Duration)
+		defer cancel()
 	}
-	if err := c.shutdown.Execute(slog.Default()); err != nil {
+	if err := c.shutdown.Execute(ctx, slog.Default()); err != nil {
 		update.Status = protocol.ShutdownStatusFailed
 		update.Message = err.Error()
 		update.AckedAt = time.Now().UTC()
@@ -381,9 +397,10 @@ func (c *Client) getCommandState(commandID string) (protocol.ShutdownAckMessage,
 
 func (c *Client) setCommandState(update protocol.ShutdownAckMessage) {
 	c.commandMu.Lock()
-	defer c.commandMu.Unlock()
 	c.commandStates[update.CommandID] = update
-	c.saveStateLocked()
+	seq, content := c.snapshotStateLocked()
+	c.commandMu.Unlock()
+	c.persistState(seq, content)
 }
 
 func (c *Client) beginOrRebindShutdownExecution(commandID string, session *connectionSession) bool {
@@ -435,11 +452,7 @@ func (s *connectionSession) Send(messageType string, payload interface{}) error 
 	if s.conn != nil {
 		_ = s.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 	}
-	envelope := protocol.Envelope{Type: messageType, Data: payload}
-	if err := json.NewEncoder(s.writer).Encode(envelope); err != nil {
-		return err
-	}
-	return s.writer.Flush()
+	return protocol.WriteEnvelope(s.writer, messageType, payload)
 }
 
 func (s *connectionSession) setReadDeadline(timeout time.Duration) {

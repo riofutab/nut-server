@@ -326,13 +326,54 @@ func TestHandleShutdownRebindsExecutingCommandToReplacementSession(t *testing.T)
 	}
 }
 
+func TestHandleShutdownTimesOutHungCommand(t *testing.T) {
+	client := NewClient(config.SlaveConfig{
+		NodeID:                 "node-1",
+		ShutdownCommandTimeout: config.Duration{Duration: 100 * time.Millisecond},
+	})
+	// A command that never returns on its own; only the timeout context unblocks it.
+	executor := &blockingShutdownExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	client.shutdown = executor
+
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+	reader := bufio.NewReader(peer)
+
+	session := newConnectionSession(conn)
+	shutdown := protocol.Envelope{
+		Type: protocol.TypeShutdown,
+		Data: protocol.ShutdownMessage{CommandID: "shutdown-timeout", Reason: "battery low", IssuedAt: time.Now().UTC()},
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.handleEnvelope(shutdown, session) }()
+
+	if first := readShutdownUpdate(t, peer, reader); first.Status != protocol.ShutdownStatusAccepted {
+		t.Fatalf("expected accepted, got %s", first.Status)
+	}
+	if second := readShutdownUpdate(t, peer, reader); second.Status != protocol.ShutdownStatusExecuting {
+		t.Fatalf("expected executing, got %s", second.Status)
+	}
+	final := readShutdownUpdate(t, peer, reader)
+	if final.Status != protocol.ShutdownStatusFailed {
+		t.Fatalf("expected hung command to time out as failed, got %s", final.Status)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("handle shutdown: %v", err)
+	}
+}
+
 type fakeShutdownExecutor struct {
 	mu    sync.Mutex
 	calls int
 	err   error
 }
 
-func (f *fakeShutdownExecutor) Execute(_ *slog.Logger) error {
+func (f *fakeShutdownExecutor) Execute(_ context.Context, _ *slog.Logger) error {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -352,12 +393,16 @@ type blockingShutdownExecutor struct {
 	once    sync.Once
 }
 
-func (b *blockingShutdownExecutor) Execute(_ *slog.Logger) error {
+func (b *blockingShutdownExecutor) Execute(ctx context.Context, _ *slog.Logger) error {
 	b.once.Do(func() {
 		close(b.started)
 	})
-	<-b.release
-	return b.err
+	select {
+	case <-b.release:
+		return b.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 var errTestShutdownFailed = testError("shutdown failed")
