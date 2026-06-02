@@ -30,6 +30,17 @@ func ReadEnvelope(reader *bufio.Reader) (Envelope, error) {
 	return env, nil
 }
 
+// WriteEnvelope encodes one newline-delimited JSON envelope to w and flushes it.
+// Shared by master and slave so the wire framing stays symmetric with
+// ReadEnvelope; callers own the write deadline and any error wrapping.
+func WriteEnvelope(w *bufio.Writer, messageType string, payload interface{}) error {
+	envelope := Envelope{Type: messageType, Data: payload}
+	if err := json.NewEncoder(w).Encode(envelope); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
 // DecodePayload re-decodes the loosely-typed Envelope.Data into a concrete
 // message type. It is shared by master and slave so any future hardening (e.g.
 // DisallowUnknownFields) applies to both sides at once.

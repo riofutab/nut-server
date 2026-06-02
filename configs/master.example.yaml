@@ -53,6 +53,8 @@ local_shutdown:
     - "/sbin/shutdown"
     - "-h"
     - "now"
+  # 关机命令最长执行时间,超时则杀掉并记为 failed(默认 2m)。自定义脚本更久就调大。
+  command_timeout: "2m"
   max_wait: "15m"
   # 紧急阈值应低于 shutdown_policy.min_runtime_minutes(默认 15),否则刚进入
   # 等待远端阶段就会立即自关,失去"最后关 master"的意义。

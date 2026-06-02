@@ -1,13 +1,14 @@
 package slave
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
 )
 
 type ShutdownExecutor interface {
-	Execute(logger *slog.Logger) error
+	Execute(ctx context.Context, logger *slog.Logger) error
 }
 
 type CommandShutdownExecutor struct {
@@ -15,7 +16,7 @@ type CommandShutdownExecutor struct {
 	DryRun  bool
 }
 
-func (s CommandShutdownExecutor) Execute(logger *slog.Logger) error {
+func (s CommandShutdownExecutor) Execute(ctx context.Context, logger *slog.Logger) error {
 	if len(s.Command) == 0 {
 		return fmt.Errorf("shutdown command is empty")
 	}
@@ -25,6 +26,9 @@ func (s CommandShutdownExecutor) Execute(logger *slog.Logger) error {
 		}
 		return nil
 	}
-	cmd := exec.Command(s.Command[0], s.Command[1:]...)
+	// CommandContext kills the process when ctx is cancelled (timeout), turning a
+	// hung shutdown script into a bounded, retriable failure instead of leaving
+	// the node stuck in "executing" forever.
+	cmd := exec.CommandContext(ctx, s.Command[0], s.Command[1:]...)
 	return cmd.Run()
 }

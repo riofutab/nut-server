@@ -2,6 +2,7 @@ package master
 
 import (
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -23,6 +24,18 @@ var (
 		Name: "nut_master_shutdown_acks_total",
 		Help: "Shutdown ack messages received from slaves, partitioned by status.",
 	}, []string{"status"})
+
+	metricShutdownAckLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "nut_master_shutdown_ack_latency_seconds",
+		Help:    "Seconds from a shutdown command being issued to a slave ack, by status.",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 20, 30, 60},
+	}, []string{"status"})
+
+	metricUPSPollDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "nut_master_ups_poll_duration_seconds",
+		Help:    "Wall-clock duration of a UPS SNMP poll.",
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+	})
 
 	metricRegisterAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "nut_master_register_attempts_total",
@@ -51,6 +64,8 @@ func buildMasterRegistry(s *Server) *prometheus.Registry {
 		metricUPSPolls,
 		metricShutdownIssued,
 		metricShutdownAcks,
+		metricShutdownAckLatency,
+		metricUPSPollDuration,
 		metricRegisterAttempts,
 		metricBuildInfo,
 		newMasterSnapshotCollector(s),
@@ -91,12 +106,31 @@ func recordRegisterAttempt(result string) {
 	metricRegisterAttempts.WithLabelValues(result).Inc()
 }
 
+// recordShutdownAckLatency observes how long a slave took to reach the given
+// status after the command was issued. Negative samples (clock skew or a
+// fabricated AckedAt) are dropped.
+func recordShutdownAckLatency(status string, seconds float64) {
+	if status == "" || seconds < 0 {
+		return
+	}
+	metricShutdownAckLatency.WithLabelValues(status).Observe(seconds)
+}
+
+func recordUPSPollDuration(seconds float64) {
+	if seconds < 0 {
+		return
+	}
+	metricUPSPollDuration.Observe(seconds)
+}
+
 type masterSnapshotCollector struct {
 	server *Server
 
 	upsOnBattery      *prometheus.Desc
 	upsBatteryCharge  *prometheus.Desc
 	upsRuntimeMinutes *prometheus.Desc
+	upsLastSuccess    *prometheus.Desc
+	upsLastError      *prometheus.Desc
 	registeredSlaves  *prometheus.Desc
 	nodesByState      *prometheus.Desc
 	shutdownActive    *prometheus.Desc
@@ -119,6 +153,16 @@ func newMasterSnapshotCollector(s *Server) *masterSnapshotCollector {
 		upsRuntimeMinutes: prometheus.NewDesc(
 			"nut_master_ups_runtime_minutes",
 			"Latest UPS remaining runtime in minutes from SNMP.",
+			nil, nil,
+		),
+		upsLastSuccess: prometheus.NewDesc(
+			"nut_master_ups_last_success_timestamp_seconds",
+			"Unix time of the last successful UPS poll (0 if never). Alert on staleness.",
+			nil, nil,
+		),
+		upsLastError: prometheus.NewDesc(
+			"nut_master_ups_last_error_timestamp_seconds",
+			"Unix time of the last failed UPS poll (0 if none).",
 			nil, nil,
 		),
 		registeredSlaves: prometheus.NewDesc(
@@ -148,6 +192,8 @@ func (c *masterSnapshotCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.upsOnBattery
 	ch <- c.upsBatteryCharge
 	ch <- c.upsRuntimeMinutes
+	ch <- c.upsLastSuccess
+	ch <- c.upsLastError
 	ch <- c.registeredSlaves
 	ch <- c.nodesByState
 	ch <- c.shutdownActive
@@ -165,6 +211,8 @@ func (c *masterSnapshotCollector) Collect(ch chan<- prometheus.Metric) {
 		if ups.RuntimeMinutes != nil {
 			ch <- prometheus.MustNewConstMetric(c.upsRuntimeMinutes, prometheus.GaugeValue, float64(*ups.RuntimeMinutes))
 		}
+		ch <- prometheus.MustNewConstMetric(c.upsLastSuccess, prometheus.GaugeValue, timeToUnix(ups.LastSuccessAt))
+		ch <- prometheus.MustNewConstMetric(c.upsLastError, prometheus.GaugeValue, timeToUnix(ups.LastErrorAt))
 	}
 
 	ch <- prometheus.MustNewConstMetric(c.registeredSlaves, prometheus.GaugeValue, float64(len(c.server.registry.List())))
@@ -208,4 +256,11 @@ func boolToFloat(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func timeToUnix(t *time.Time) float64 {
+	if t == nil || t.IsZero() {
+		return 0
+	}
+	return float64(t.Unix())
 }

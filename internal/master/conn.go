@@ -2,6 +2,7 @@ package master
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,28 @@ import (
 	"nut-server/internal/protocol"
 	"nut-server/internal/security"
 )
+
+func (s *Server) trackConn(conn net.Conn) {
+	s.connsMu.Lock()
+	s.conns[conn] = struct{}{}
+	s.connsMu.Unlock()
+}
+
+func (s *Server) untrackConn(conn net.Conn) {
+	s.connsMu.Lock()
+	delete(s.conns, conn)
+	s.connsMu.Unlock()
+}
+
+// closeActiveConns force-closes every in-flight connection so their handler
+// goroutines unblock from a pending read and return promptly during shutdown.
+func (s *Server) closeActiveConns() {
+	s.connsMu.Lock()
+	for conn := range s.conns {
+		_ = conn.Close()
+	}
+	s.connsMu.Unlock()
+}
 
 func (s *Server) handleConn(conn net.Conn) {
 	client := NewClient(conn)
@@ -117,7 +140,14 @@ func verifyPeerIdentity(conn net.Conn, nodeID string, enforce bool) error {
 	if !ok {
 		return nil
 	}
-	certs := tlsConn.ConnectionState().PeerCertificates
+	return matchCertIdentity(tlsConn.ConnectionState().PeerCertificates, nodeID)
+}
+
+// matchCertIdentity reports whether the leaf certificate binds nodeID via its
+// CommonName or a DNS SAN. An empty chain (token-only / plaintext peer that
+// happens to be enforced) is treated as a no-op so trust falls back to the
+// shared token; a present-but-mismatched certificate is a hard rejection.
+func matchCertIdentity(certs []*x509.Certificate, nodeID string) error {
 	if len(certs) == 0 {
 		return nil
 	}
@@ -148,8 +178,11 @@ func (s *Server) handleEnvelope(client *Client, env protocol.Envelope) error {
 		// Bind the ack to the authenticated connection identity: a slave may
 		// only report status for itself, never forge acks for other nodes.
 		ack.NodeID = client.NodeID
-		s.recordShutdownUpdate(ack)
+		// Bump the counter before recordShutdownUpdate publishes the new status
+		// to Status(): callers that observe the status (and tests) must never
+		// see an "executed" node whose ack counter has not advanced yet.
 		recordShutdownAck(ack.Status)
+		s.recordShutdownUpdate(ack)
 		slog.Info("shutdown update",
 			"command_id", ack.CommandID,
 			"node_id", ack.NodeID,

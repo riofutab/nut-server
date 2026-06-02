@@ -9,6 +9,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultShutdownCommandTimeout bounds how long a shutdown command may run before
+// it is killed and reported as failed. It is generous enough for any real
+// shutdown (`/sbin/shutdown -h now` returns near-instantly) while turning a hung
+// custom script into a bounded, retriable failure instead of a permanent stall.
+const DefaultShutdownCommandTimeout = 2 * time.Minute
+
+// Standard UPS-MIB (RFC 1628) OIDs used as SNMP defaults when the config leaves
+// them blank, so a stock UPS works out of the box.
+const (
+	defaultOutputSourceOID   = ".1.3.6.1.2.1.33.1.4.1.0" // upsOutputSource
+	defaultChargeOID         = ".1.3.6.1.2.1.33.1.2.4.0" // upsEstimatedChargeRemaining
+	defaultRuntimeMinutesOID = ".1.3.6.1.2.1.33.1.2.3.0" // upsEstimatedMinutesRemaining
+)
+
 type MasterConfig struct {
 	ListenAddr       string               `yaml:"listen_addr"`
 	AdminListenAddr  string               `yaml:"admin_listen_addr"`
@@ -51,6 +65,7 @@ type ShutdownPolicyTarget struct {
 type LocalShutdownConfig struct {
 	Enabled                 bool     `yaml:"enabled"`
 	Command                 []string `yaml:"command"`
+	CommandTimeout          Duration `yaml:"command_timeout"`
 	MaxWait                 Duration `yaml:"max_wait"`
 	EmergencyRuntimeMinutes int      `yaml:"emergency_runtime_minutes"`
 	maxWaitSet              bool
@@ -76,16 +91,17 @@ type SNMPConfig struct {
 }
 
 type SlaveConfig struct {
-	NodeID            string    `yaml:"node_id"`
-	MasterAddr        string    `yaml:"master_addr"`
-	Token             string    `yaml:"token"`
-	Tags              []string  `yaml:"tags"`
-	StateFile         string    `yaml:"state_file"`
-	MetricsListenAddr string    `yaml:"metrics_listen_addr"`
-	ReconnectInterval Duration  `yaml:"reconnect_interval"`
-	DryRun            bool      `yaml:"dry_run"`
-	TLS               TLSConfig `yaml:"tls"`
-	ShutdownCommand   []string  `yaml:"shutdown_command"`
+	NodeID                 string    `yaml:"node_id"`
+	MasterAddr             string    `yaml:"master_addr"`
+	Token                  string    `yaml:"token"`
+	Tags                   []string  `yaml:"tags"`
+	StateFile              string    `yaml:"state_file"`
+	MetricsListenAddr      string    `yaml:"metrics_listen_addr"`
+	ReconnectInterval      Duration  `yaml:"reconnect_interval"`
+	DryRun                 bool      `yaml:"dry_run"`
+	TLS                    TLSConfig `yaml:"tls"`
+	ShutdownCommand        []string  `yaml:"shutdown_command"`
+	ShutdownCommandTimeout Duration  `yaml:"shutdown_command_timeout"`
 }
 
 type TLSConfig struct {
@@ -252,6 +268,12 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.LocalShutdown.EmergencyRuntimeMinutes == 0 {
 		cfg.LocalShutdown.EmergencyRuntimeMinutes = 15
 	}
+	if cfg.LocalShutdown.CommandTimeout.Duration < 0 {
+		return MasterConfig{}, fmt.Errorf("local_shutdown.command_timeout must not be negative")
+	}
+	if cfg.LocalShutdown.CommandTimeout.Duration == 0 {
+		cfg.LocalShutdown.CommandTimeout.Duration = DefaultShutdownCommandTimeout
+	}
 	if err := cfg.TLS.ValidateServer(); err != nil {
 		return MasterConfig{}, err
 	}
@@ -265,13 +287,13 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 		cfg.SNMP.TimeoutSeconds = 2
 	}
 	if cfg.SNMP.OutputSourceOID == "" {
-		cfg.SNMP.OutputSourceOID = ".1.3.6.1.2.1.33.1.4.1.0"
+		cfg.SNMP.OutputSourceOID = defaultOutputSourceOID
 	}
 	if cfg.SNMP.ChargeOID == "" {
-		cfg.SNMP.ChargeOID = ".1.3.6.1.2.1.33.1.2.4.0"
+		cfg.SNMP.ChargeOID = defaultChargeOID
 	}
 	if cfg.SNMP.RuntimeMinutesOID == "" {
-		cfg.SNMP.RuntimeMinutesOID = ".1.3.6.1.2.1.33.1.2.3.0"
+		cfg.SNMP.RuntimeMinutesOID = defaultRuntimeMinutesOID
 	}
 	if cfg.ShutdownPolicy.ShutdownReason == "" {
 		cfg.ShutdownPolicy.ShutdownReason = "UPS battery threshold reached"
@@ -348,6 +370,12 @@ func LoadSlaveConfig(path string) (SlaveConfig, error) {
 	}
 	if len(cfg.ShutdownCommand) == 0 {
 		cfg.ShutdownCommand = []string{"/sbin/shutdown", "-h", "now"}
+	}
+	if cfg.ShutdownCommandTimeout.Duration < 0 {
+		return SlaveConfig{}, fmt.Errorf("shutdown_command_timeout must not be negative")
+	}
+	if cfg.ShutdownCommandTimeout.Duration == 0 {
+		cfg.ShutdownCommandTimeout.Duration = DefaultShutdownCommandTimeout
 	}
 	return cfg, nil
 }

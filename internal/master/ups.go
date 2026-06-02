@@ -27,6 +27,7 @@ func (s *Server) runPollingLoop(ctx context.Context) {
 func (s *Server) evaluateUPS() error {
 	polledAt := time.Now().UTC()
 	status, err := ReadUPSStatus(s.cfg.SNMP)
+	recordUPSPollDuration(time.Since(polledAt).Seconds())
 	if err != nil {
 		s.recordUPSError(err, polledAt)
 		recordUPSPollResult(false)

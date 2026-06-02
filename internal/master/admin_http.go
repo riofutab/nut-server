@@ -19,6 +19,8 @@ import (
 func (s *Server) runAdminServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", promhttp.HandlerFor(masterPromRegistry(s), promhttp.HandlerOpts{}))
 	mux.HandleFunc("/status", s.requireAdminToken(s.handleStatus))
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
@@ -40,6 +42,24 @@ func (s *Server) runAdminServer(ctx context.Context) {
 	}
 }
 
+// handleHealthz is an unauthenticated liveness probe: a 200 means the admin
+// process is up and serving. It deliberately checks nothing else so a transient
+// dependency failure never makes an orchestrator kill a healthy process.
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writePlain(w, http.StatusOK, "ok")
+}
+
+// handleReadyz is an unauthenticated readiness probe: 200 once the master TCP
+// listener is accepting slave connections, 503 before startup or during
+// shutdown.
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if s.ready.Load() {
+		writePlain(w, http.StatusOK, "ready")
+		return
+	}
+	writePlain(w, http.StatusServiceUnavailable, "not ready")
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -55,18 +75,18 @@ func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
 	expected := []byte(s.cfg.AdminToken)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if len(expected) == 0 {
-			http.Error(w, "admin token not configured", http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "admin token not configured")
 			return
 		}
 		header := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(header, prefix) {
-			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
 		candidate := []byte(strings.TrimPrefix(header, prefix))
 		if subtle.ConstantTimeCompare(candidate, expected) != 1 {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
 		next(w, r)
@@ -75,7 +95,7 @@ func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	writeJSON(w, http.StatusOK, s.Status())
@@ -83,12 +103,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleManualShutdown(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var request protocol.ShutdownRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 	message, summary, err := s.TriggerShutdown(request)
@@ -99,7 +119,7 @@ func (s *Server) handleManualShutdown(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errShutdownAlreadyActive) {
 			status = http.StatusConflict
 		}
-		http.Error(w, err.Error(), status)
+		writeJSONError(w, status, err.Error())
 		return
 	}
 	response := map[string]interface{}{
@@ -119,7 +139,7 @@ func (s *Server) handleManualShutdown(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	s.ResetActiveCommand()
@@ -135,12 +155,12 @@ type expectNodeRequest struct {
 func (s *Server) handleExpectNode(w http.ResponseWriter, r *http.Request) {
 	var req expectNodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "decode body: "+err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "decode body: "+err.Error())
 		return
 	}
 	req.NodeID = strings.TrimSpace(req.NodeID)
 	if req.NodeID == "" {
-		http.Error(w, "node_id is required", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "node_id is required")
 		return
 	}
 	s.directory.SetExpected(req.NodeID, req.Hostname, req.Tags)
@@ -152,7 +172,7 @@ func (s *Server) handleExpectNode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnsetExpected(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("node_id")
 	if nodeID == "" {
-		http.Error(w, "node_id is required", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "node_id is required")
 		return
 	}
 	s.directory.UnsetExpected(nodeID)
@@ -163,7 +183,7 @@ func (s *Server) handleUnsetExpected(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("node_id")
 	if nodeID == "" {
-		http.Error(w, "node_id is required", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "node_id is required")
 		return
 	}
 	switch s.directory.Delete(nodeID) {
@@ -171,10 +191,22 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		s.saveStateForDirectoryChange()
 		w.WriteHeader(http.StatusNoContent)
 	case DeleteNotFound:
-		http.Error(w, "node not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "node not found")
 	case DeleteRefusedSeen:
-		http.Error(w, "node has been seen; cannot delete", http.StatusConflict)
+		writeJSONError(w, http.StatusConflict, "node has been seen; cannot delete")
 	}
+}
+
+// writeJSONError emits errors in the same JSON envelope as success responses so
+// admin API clients never have to parse two response shapes.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writePlain(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body + "\n"))
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {

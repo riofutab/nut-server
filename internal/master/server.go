@@ -25,6 +25,7 @@ type Server struct {
 	directory           *NodeDirectory
 	commandSeq          atomic.Uint64
 	shutdownIssued      atomic.Bool
+	ready               atomic.Bool
 	commandMu           sync.Mutex
 	commands            map[string]*shutdownCommandState
 	activeCommand       string
@@ -34,6 +35,18 @@ type Server struct {
 	upsMu               sync.RWMutex
 	upsStatus           *protocol.UPSStatusView
 	tlsConfig           *tls.Config
+	// State persistence. persistSeq is bumped under commandMu when a snapshot is
+	// taken; the disk write runs under persistMu (NOT commandMu) so the fsync no
+	// longer blocks readers or the command-watcher tick. persistedSeq guards
+	// against a slow writer clobbering a newer snapshot.
+	persistMu    sync.Mutex
+	persistSeq   uint64
+	persistedSeq uint64
+	// Active connection handlers. Run drains these on shutdown so a handler's
+	// state write (e.g. saveStateForDirectoryChange on register) cannot land
+	// after Run returns.
+	connsMu sync.Mutex
+	conns   map[net.Conn]struct{}
 }
 
 type shutdownCommandState struct {
@@ -61,6 +74,7 @@ func NewServer(cfg config.MasterConfig) *Server {
 		registry:  NewRegistry(),
 		directory: NewNodeDirectory(),
 		commands:  make(map[string]*shutdownCommandState),
+		conns:     make(map[net.Conn]struct{}),
 	}
 	server.localShutdownRunner = server.runLocalShutdownCommand
 	if cfg.SNMP.Target != "" {
@@ -90,6 +104,8 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen on %s: %w", s.cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	s.ready.Store(true)
+	defer s.ready.Store(false)
 
 	slog.Info("master listening",
 		"addr", s.cfg.ListenAddr,
@@ -107,16 +123,28 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); s.runAdminServer(ctx) }()
 	go func() { defer wg.Done(); s.runCommandWatcher(ctx) }()
 
+	var connWG sync.WaitGroup
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				slog.Info("master shutting down", "reason", ctx.Err())
+				// Force-close in-flight connections so their handlers unblock
+				// from ReadEnvelope, then wait for any pending state writes to
+				// flush before returning (and before callers tear down dirs).
+				s.closeActiveConns()
+				connWG.Wait()
 				wg.Wait()
 				return nil
 			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
-		go s.handleConn(conn)
+		s.trackConn(conn)
+		connWG.Add(1)
+		go func(c net.Conn) {
+			defer connWG.Done()
+			defer s.untrackConn(c)
+			s.handleConn(c)
+		}(conn)
 	}
 }
