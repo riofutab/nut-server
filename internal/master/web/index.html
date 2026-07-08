@@ -101,6 +101,13 @@ function escape(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function fmtDuration(minutes) {
+  if (minutes < 60) return minutes + 'm';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h + 'h' + (m ? ' ' + m + 'm' : '');
+}
+
 function fmtAge(ts) {
   if (!ts) return '—';
   const d = new Date(ts);
@@ -122,15 +129,16 @@ function renderUps(ups) {
     ['target',       ups.target || '—'],
     ['on battery',   ups.on_battery == null ? '—' : (ups.on_battery ? 'yes' : 'no')],
     ['charge',       ups.battery_charge == null ? '—' : ups.battery_charge + '%'],
-    ['runtime',      ups.runtime_minutes == null ? '—' : ups.runtime_minutes + 'm'],
+    ['runtime',      ups.runtime_minutes == null ? '—' : fmtDuration(ups.runtime_minutes) + ' (' + ups.runtime_minutes + 'm)'],
     ['last poll',    fmtAge(ups.last_success_at)],
   ];
+  const titles = { runtime: 'UPS-estimated time left on battery power at current charge/load' };
   let extra = '';
   if (ups.last_error) {
     extra = '<p class=error>last error: ' + escape(ups.last_error) + ' (' + fmtAge(ups.last_error_at) + ')</p>';
   }
   el.innerHTML = '<h2>UPS</h2><table>' +
-    rows.map(r => '<tr><td>' + r[0] + '</td><td>' + escape(String(r[1])) + '</td></tr>').join('') +
+    rows.map(r => '<tr><td' + (titles[r[0]] ? ' title="' + escape(titles[r[0]]) + '"' : '') + '>' + r[0] + '</td><td>' + escape(String(r[1])) + '</td></tr>').join('') +
     '</table>' + extra;
 }
 
