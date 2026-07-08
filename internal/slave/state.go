@@ -41,7 +41,7 @@ func (c *Client) snapshotStateLocked() (uint64, []byte) {
 	if c.cfg.StateFile == "" {
 		return 0, nil
 	}
-	content, err := json.MarshalIndent(c.commandStates, "", "  ")
+	content, err := json.Marshal(c.commandStates)
 	if err != nil {
 		slog.Error("encode slave state failed", "err", err)
 		return 0, nil

@@ -224,7 +224,7 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 
 	for {
 		session.setReadDeadline(readIdleTimeout)
-		env, err := readEnvelope(session.reader)
+		env, err := protocol.ReadEnvelope(session.reader)
 		if err != nil {
 			return err
 		}
@@ -235,7 +235,7 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 }
 
 func (c *Client) expectRegisterAck(reader *bufio.Reader) error {
-	env, err := readEnvelope(reader)
+	env, err := protocol.ReadEnvelope(reader)
 	if err != nil {
 		return fmt.Errorf("read register ack: %w", err)
 	}
@@ -243,7 +243,7 @@ func (c *Client) expectRegisterAck(reader *bufio.Reader) error {
 		return fmt.Errorf("expected register_ack, got %s", env.Type)
 	}
 	var ack protocol.RegisterAckMessage
-	if err := decodePayload(env.Data, &ack); err != nil {
+	if err := protocol.DecodePayload(env.Data, &ack); err != nil {
 		return err
 	}
 	if !ack.Accepted {
@@ -268,7 +268,7 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 	switch env.Type {
 	case protocol.TypeShutdown:
 		var shutdown protocol.ShutdownMessage
-		if err := decodePayload(env.Data, &shutdown); err != nil {
+		if err := protocol.DecodePayload(env.Data, &shutdown); err != nil {
 			return err
 		}
 		if existing, ok := c.getCommandState(shutdown.CommandID); ok {
@@ -307,7 +307,7 @@ func (c *Client) handleEnvelope(env protocol.Envelope, session *connectionSessio
 		return nil
 	case protocol.TypeError:
 		var msg protocol.ErrorMessage
-		if err := decodePayload(env.Data, &msg); err != nil {
+		if err := protocol.DecodePayload(env.Data, &msg); err != nil {
 			return err
 		}
 		return fmt.Errorf("master error: %s", msg.Message)
@@ -427,14 +427,6 @@ func (c *Client) shutdownExecutionSession(commandID string) *connectionSession {
 		return execution.session
 	}
 	return nil
-}
-
-func readEnvelope(reader *bufio.Reader) (protocol.Envelope, error) {
-	return protocol.ReadEnvelope(reader)
-}
-
-func decodePayload(data interface{}, dst interface{}) error {
-	return protocol.DecodePayload(data, dst)
 }
 
 func newConnectionSession(conn net.Conn) *connectionSession {

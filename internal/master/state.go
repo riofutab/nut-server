@@ -76,7 +76,7 @@ func (s *Server) snapshotStateLocked() (uint64, []byte) {
 		Commands:            s.commands,
 		Nodes:               s.directory.snapshotForPersist(),
 	}
-	content, err := json.MarshalIndent(state, "", "  ")
+	content, err := json.Marshal(state)
 	if err != nil {
 		slog.Error("encode master state failed", "err", err)
 		return 0, nil

@@ -13,6 +13,13 @@ import (
 
 var errShutdownAlreadyActive = fmt.Errorf("shutdown already active")
 
+// maxRetainedCompletedCommands bounds s.commands so a master that runs for
+// months doesn't grow the map (and the state file / per-request Status clone)
+// without limit. Completed commands beyond this count are pruned, oldest
+// first, skipping the active command and the one local_shutdown is currently
+// waiting on (see pruneCompletedCommandsLocked).
+const maxRetainedCompletedCommands = 200
+
 func (s *Server) TriggerShutdown(request protocol.ShutdownRequest) (protocol.ShutdownMessage, protocol.CommandSummary, error) {
 	return s.triggerShutdown(request, false)
 }
@@ -215,6 +222,9 @@ func (s *Server) markTimedOutCommands(now time.Time) {
 			changed = true
 		}
 	}
+	if s.pruneCompletedCommandsLocked() {
+		changed = true
+	}
 	var seq uint64
 	var content []byte
 	if changed {
@@ -222,6 +232,42 @@ func (s *Server) markTimedOutCommands(now time.Time) {
 	}
 	s.commandMu.Unlock()
 	s.persistState(seq, content)
+}
+
+// pruneCompletedCommandsLocked evicts the oldest completed commands once
+// s.commands exceeds maxRetainedCompletedCommands, so a long-running master
+// doesn't accumulate shutdown history forever. It must be called with
+// commandMu held. A command is only ever looked up again by ID while it is
+// s.activeCommand (replay) or referenced by s.localShutdown.CommandID (the
+// "wait for remote" state machine in evaluateLocalShutdown / state.go), so
+// both are exempt regardless of age. Returns true if anything was deleted.
+func (s *Server) pruneCompletedCommandsLocked() bool {
+	excess := len(s.commands) - maxRetainedCompletedCommands
+	if excess <= 0 {
+		return false
+	}
+	type candidate struct {
+		id string
+		at time.Time
+	}
+	candidates := make([]candidate, 0, excess)
+	for id, command := range s.commands {
+		if command.CompletedAt == nil || id == s.activeCommand {
+			continue
+		}
+		if s.localShutdown != nil && s.localShutdown.CommandID == id {
+			continue
+		}
+		candidates = append(candidates, candidate{id: id, at: *command.CompletedAt})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].at.Before(candidates[j].at) })
+	if excess > len(candidates) {
+		excess = len(candidates)
+	}
+	for i := 0; i < excess; i++ {
+		delete(s.commands, candidates[i].id)
+	}
+	return excess > 0
 }
 
 func (s *Server) recordShutdownUpdate(update protocol.ShutdownAckMessage) {

@@ -29,15 +29,25 @@ func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
 	}
 	defer client.Conn.Close()
 
-	outputSource, err := getInt(client, cfg.OutputSourceOID)
+	// One batched GET for all three OIDs instead of three round-trips: SNMP GET
+	// natively carries multiple varbinds, and a compliant agent (RFC 3416)
+	// always returns them in request order, so positional indexing below is safe.
+	packet, err := client.Get([]string{cfg.OutputSourceOID, cfg.ChargeOID, cfg.RuntimeMinutesOID})
+	if err != nil {
+		return UPSStatus{}, fmt.Errorf("read ups oids: %w", err)
+	}
+	if len(packet.Variables) != 3 {
+		return UPSStatus{}, fmt.Errorf("unexpected variable count: got %d want 3", len(packet.Variables))
+	}
+	outputSource, err := decodeIntVariable(cfg.OutputSourceOID, packet.Variables[0])
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read output source oid: %w", err)
 	}
-	charge, err := getInt(client, cfg.ChargeOID)
+	charge, err := decodeIntVariable(cfg.ChargeOID, packet.Variables[1])
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read charge oid: %w", err)
 	}
-	runtimeMinutes, err := getInt(client, cfg.RuntimeMinutesOID)
+	runtimeMinutes, err := decodeIntVariable(cfg.RuntimeMinutesOID, packet.Variables[2])
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read runtime oid: %w", err)
 	}
@@ -49,19 +59,11 @@ func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
 	}, nil
 }
 
-func getInt(client *gosnmp.GoSNMP, oid string) (int, error) {
-	packet, err := client.Get([]string{oid})
-	if err != nil {
-		return 0, err
-	}
-	if len(packet.Variables) != 1 {
-		return 0, fmt.Errorf("unexpected variable count for oid %s", oid)
-	}
-	variable := packet.Variables[0]
-	// An SNMP exception varbind (unsupported/typo'd OID) decodes to a non-nil
-	// big.Int(0) via ToBigInt, which would otherwise be read as a genuine 0 and
-	// misinterpreted as a critically low charge/runtime. Reject it as an error
-	// so a misconfigured OID surfaces a poll failure instead of a false reading.
+// decodeIntVariable rejects an SNMP exception varbind (unsupported/typo'd OID),
+// which otherwise decodes to a non-nil big.Int(0) via ToBigInt and would be
+// misread as a genuine 0 — a critically low charge/runtime. Surfacing it as an
+// error turns a misconfigured OID into a poll failure instead of a false reading.
+func decodeIntVariable(oid string, variable gosnmp.SnmpPDU) (int, error) {
 	switch variable.Type {
 	case gosnmp.NoSuchObject, gosnmp.NoSuchInstance, gosnmp.EndOfMibView:
 		return 0, fmt.Errorf("oid %s not available on device (%v)", oid, variable.Type)
