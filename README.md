@@ -507,16 +507,13 @@ go test -tags e2e -count=1 ./internal/e2e/...
 
 ## 路线图
 
-当前在跑的版本 / 已落地能力见 [CHANGELOG.md](CHANGELOG.md)。下面是接下来可能优先做的方向, **欢迎在 Issue 里讨论优先级或认领**:
+当前在跑的版本 / 已落地能力见 [CHANGELOG.md](CHANGELOG.md)。v0.4.0 / v0.5.0 实际投入的是安全与运维硬化,下面这些功能性方向都还未落地, **欢迎在 Issue 里讨论优先级或认领**:
 
-### v0.4.x 候选
+### 候选
 
 - **更完整的 SNMP 厂商兼容** (APC / Eaton / CyberPower 的厂商 MIB,而不只 UPS-MIB)
 - **关机策略防抖**: 每条 `shutdown_policies[*]` 加 `duration` 字段,连续 N 秒满足才触发,防 SNMP 毛刺误关
-- **per-node token / mTLS client cert 加固**: 让 `auth_tokens` 不再全局共享一份,单节点泄漏不影响其它
-
-### v0.5.x 候选
-
+- **per-node token**: 让 `auth_tokens` 不再全局共享一份,单节点泄漏不影响其它(mTLS 场景已有 `tls.bind_node_id_to_cert` 做证书身份绑定)
 - **多 UPS 支持**: 一个 master 同时管多台 UPS,按 UPS 区分关机策略 target
 - **HTTPS admin 端**: admin 监听口原生支持 TLS,不必依赖外部反代
 - **API / Web 状态页扩展**: 当前活动命令的实时进度推送 (SSE),Web 状态页用更现代框架重写
