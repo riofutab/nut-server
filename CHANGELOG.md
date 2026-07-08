@@ -8,6 +8,22 @@
 
 尚无未发布改动。
 
+## [0.5.1] - 2026-07-08
+
+小版本,内部优化 + 一处真实的无界增长修复。**无破坏性改动,无 config schema 变化**。
+
+### Fixed
+- **`s.commands` 历史命令无界增长**: 完成态命令超过 200 条后按完成时间裁剪最旧的,跳过当前 `activeCommand` 和 `local_shutdown` 正在等待的那条,长期运行的 master 状态文件与 `/status` 响应不再随历史命令数量无限增长。
+
+### Changed
+- **SNMP 轮询合并为单次批量 GET**: `output_source` / `charge` / `runtime` 三个 OID 从 3 次往返合并成 1 次,每个 `poll_interval` 周期少 2/3 网络开销。
+- **状态文件落盘去掉多余的 pretty-print 缩进**: master / slave 都从 `MarshalIndent` 换成 `Marshal`,纯机器读写的崩溃恢复文件不需要人类可读格式。
+
+### Removed
+- **slave 端两个纯转发的空壳包装函数**(`readEnvelope` / `decodePayload`)清理,调用点直接走 `protocol.ReadEnvelope` / `protocol.DecodePayload`。
+
+[完整发布说明](.github/release-notes/v0.5.1.md)
+
 ## [0.5.0] - 2026-06-02
 
 运维就绪 / 健壮性版本,一轮 6 维度架构师 review 的 13 条优化全部落地。**完全向后兼容**:新增 config 字段都有安全默认值,新增端点 / 指标为纯增量。
