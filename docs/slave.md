@@ -60,11 +60,11 @@ v0.6.0 起安装脚本不再接受 `--token`。安装脚本（master 生成的�
 ## 在线安装
 
 ```bash
-sudo ./scripts/install-online.sh --role slave --version v0.6.0-rc.1 -- \
+sudo ./scripts/install-online.sh --role slave --version v0.6.0-rc.2 -- \
   --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 
-v0.6.0 正式版发布前，`--version latest` 会装到 v0.5.1，它的安装脚本与本文档不一致，所以这里固定使用 `--version v0.6.0-rc.1`。
+v0.6.0 正式版发布前，`--version latest` 会装到 v0.5.1，它的安装脚本与本文档不一致，所以这里固定使用 `--version v0.6.0-rc.2`。
 
 不传 `--` 后面的参数时，`install-online.sh` 会优先尝试 `.deb` / `.rpm`；传了 role-script 参数则走 tar.gz 路径，方便预填配置。
 

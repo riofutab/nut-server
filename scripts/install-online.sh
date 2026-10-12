@@ -31,8 +31,8 @@ usage: install-online.sh --role <master|slave|upgrade-master|upgrade-slave> [--v
   per-node token off the command line.
 
 Examples:
-  ./scripts/install-online.sh --role master --version v0.6.0-rc.1 -- --token-file /root/nut-enroll-token --snmp-target 10.0.0.31
-  ./scripts/install-online.sh --role slave --version v0.6.0-rc.1 -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-token
+  ./scripts/install-online.sh --role master --version v0.6.0-rc.2 -- --token-file /root/nut-enroll-token --snmp-target 10.0.0.31
+  ./scripts/install-online.sh --role slave --version v0.6.0-rc.2 -- --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-token
   ./scripts/install-online.sh --role master --version latest --pkg deb
   ./scripts/install-online.sh --role upgrade-master --version latest
 EOF
