@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-计划发布为 v0.6.0。所有破坏性配置变更集中在这一版。**master 配置必须改写**；master 与 slave 升级不分先后（两边需已是 v0.5.2）。逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
+计划发布为 v0.6.0,预发布版 v0.6.0-rc.1 供实机验证。所有破坏性配置变更集中在这一版,并包含下方 0.5.2 的全部修复(0.5.2 未单独发布)。**master 配置必须改写;先升 master 再升 slave。**逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
 
 ### Added
 - **per-node token**:slave 首次用 `enrollment_tokens` 注册后,master 签发专属 token,只保存其 SHA-256;此后该 node_id 只能用专属 token 注册,共享 token 不能再冒用已注册节点。`enrollment: closed` 拒绝新节点;`DELETE /nodes/{node_id}/token` 吊销。`/status` 新增 `enrolled`。
@@ -24,6 +24,7 @@
 - slave state 文件改为结构化格式(含签发的 token),旧文件的已处理命令记录丢弃一次。
 - 指标 `nut_master_register_attempts_total` 新增 `result="enrolled"`。
 - 取消预期节点改为 `DELETE /nodes/{node_id}/expected`(原 `DELETE /nodes/expect/{node_id}`),避免与 `DELETE /nodes/{node_id}/token` 路径冲突。
+- 状态页新增「Master shutdown」区块:显示本机关机阶段、触发原因(含 `ups_unreachable`)、截止时间、失败原因与关机命令自检结果。
 - 签发的 token 只在 slave 回复 `token_stored` 后生效,旧版 slave 不受影响,继续用 enrollment token 注册。
 
 ### Fixed
@@ -32,7 +33,7 @@
 ### Removed
 - `auth_tokens`(改名 `enrollment_tokens`)、旧格式 `shutdown_policy`、`when.on_battery`、`snmp.output_source_oid` / `charge_oid` / `runtime_minutes_oid`、`GET /install/slave`。配置改为严格解析,未知字段启动报错。
 
-## [0.5.2] - 待发布
+## [0.5.2] - 未单独发布,随 v0.6.0 发布
 
 修复一批会导致漏关、误关或关机失败的问题。**升级顺序:先 master 后 slave**;配置校验有收紧,详见 [docs/upgrade.md](docs/upgrade.md)。
 
