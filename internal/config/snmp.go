@@ -114,9 +114,11 @@ func ResolveSNMPVars(snmp *SNMPConfig) error {
 	if snmp.Runtime.OID == "" {
 		return fmt.Errorf("snmp.runtime.oid must not be empty")
 	}
+	// No default unit: the profile's unit may not match the overriding OID, and
+	// guessing wrong scales runtime by 60x or 6000x.
 	switch snmp.Runtime.Unit {
 	case "":
-		snmp.Runtime.Unit = RuntimeUnitMinutes
+		return fmt.Errorf("snmp.runtime.unit must be set when snmp.runtime is overridden; use %q, %q or %q", RuntimeUnitMinutes, RuntimeUnitSeconds, RuntimeUnitTimeTicks)
 	case RuntimeUnitMinutes, RuntimeUnitSeconds, RuntimeUnitTimeTicks:
 	default:
 		return fmt.Errorf("snmp.runtime.unit %q is invalid; use %q, %q or %q", snmp.Runtime.Unit, RuntimeUnitMinutes, RuntimeUnitSeconds, RuntimeUnitTimeTicks)
@@ -135,7 +137,13 @@ func normalizeSNMPVersion(snmp *SNMPConfig) error {
 		return fmt.Errorf("snmp.version %q is invalid; use \"1\", \"2c\" or \"3\"", snmp.Version)
 	}
 	if snmp.Version != "3" {
-		return rejectUSMSettings(snmp)
+		if err := rejectUSMSettings(snmp); err != nil {
+			return err
+		}
+		if snmp.Community == "" {
+			return fmt.Errorf("snmp.community must not be empty for SNMP v%s", snmp.Version)
+		}
+		return nil
 	}
 	return validateUSM(snmp)
 }

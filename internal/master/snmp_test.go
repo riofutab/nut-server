@@ -1,6 +1,7 @@
 package master
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -249,4 +250,64 @@ func profileSNMPConfig(t *testing.T, profile string) config.SNMPConfig {
 		t.Fatalf("resolve snmp vars: %v", err)
 	}
 	return cfg
+}
+
+func TestDecodeUPSPacketRejectsNegativeReadings(t *testing.T) {
+	cases := []struct {
+		name    string
+		charge  int
+		runtime int
+		wantOID string
+	}{
+		{name: "charge", charge: -1, runtime: 25, wantOID: ".1.3.6.1.2.1.33.1.2.4.0"},
+		{name: "runtime", charge: 80, runtime: -1, wantOID: ".1.3.6.1.2.1.33.1.2.3.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			packet := &gosnmp.SnmpPacket{Variables: []gosnmp.SnmpPDU{
+				{Type: gosnmp.Integer, Value: 5},
+				{Type: gosnmp.Integer, Value: tc.charge},
+				{Type: gosnmp.Integer, Value: tc.runtime},
+			}}
+
+			_, err := decodeUPSPacket(defaultSNMPConfig(t), packet)
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantOID) || !strings.Contains(err.Error(), "-1") {
+				t.Fatalf("expected error naming %s and -1, got %v", tc.wantOID, err)
+			}
+		})
+	}
+}
+
+func TestDecodeUPSPacketRejectsTimeTicksRuntimeWithOtherUnit(t *testing.T) {
+	cfg := profileSNMPConfig(t, "ups-mib") // runtime unit: minutes
+	packet := &gosnmp.SnmpPacket{Variables: []gosnmp.SnmpPDU{
+		{Type: gosnmp.Integer, Value: 5},
+		{Type: gosnmp.Integer, Value: 80},
+		{Type: gosnmp.TimeTicks, Value: uint32(360000)},
+	}}
+
+	_, err := decodeUPSPacket(cfg, packet)
+
+	if err == nil || !strings.Contains(err.Error(), "snmp.runtime.unit: timeticks") {
+		t.Fatalf("expected TimeTicks/unit mismatch error, got %v", err)
+	}
+}
+
+func TestDecodeUPSPacketAcceptsIntegerRuntimeWithTimeTicksUnit(t *testing.T) {
+	cfg := profileSNMPConfig(t, "apc") // runtime unit: timeticks
+	packet := &gosnmp.SnmpPacket{Variables: []gosnmp.SnmpPDU{
+		{Type: gosnmp.Integer, Value: 3},
+		{Type: gosnmp.Integer, Value: 80},
+		{Type: gosnmp.Integer, Value: 90000},
+	}}
+
+	status, err := decodeUPSPacket(cfg, packet)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.RuntimeMinutes != 15 {
+		t.Fatalf("runtime=%d want 15", status.RuntimeMinutes)
+	}
 }

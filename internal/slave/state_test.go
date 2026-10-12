@@ -40,6 +40,31 @@ func TestClientLoadStateIgnoresMissingFile(t *testing.T) {
 	}
 }
 
+func TestClientLoadStateMovesCorruptFileAside(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "slave-state.json")
+	corrupt := []byte(`{"issued_token": "node-token", "commands": `)
+	if err := os.WriteFile(stateFile, corrupt, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	client := NewClient(config.SlaveConfig{NodeID: "node-1", StateFile: stateFile})
+
+	if client.issuedToken != "" || len(client.commandStates) != 0 {
+		t.Fatalf("expected empty state, got token %q commands %v", client.issuedToken, client.commandStates)
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("expected corrupt state file to be moved away, stat err=%v", err)
+	}
+	moved, err := filepath.Glob(stateFile + ".corrupt-*")
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("expected one %s.corrupt-* file, got %v (err %v)", stateFile, moved, err)
+	}
+	content, err := os.ReadFile(moved[0])
+	if err != nil || string(content) != string(corrupt) {
+		t.Fatalf("expected moved file to keep the original bytes, got %q (err %v)", content, err)
+	}
+}
+
 func TestClientSaveStateCreatesParentDirectory(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "nested", "slave-state.json")
 	client := NewClient(config.SlaveConfig{NodeID: "node-1", StateFile: stateFile})

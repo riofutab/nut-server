@@ -3,10 +3,12 @@ package config
 import (
 	"bytes"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +23,16 @@ const DefaultShutdownCommandTimeout = 2 * time.Minute
 
 // maxChargePercent is the upper bound of a charge_below threshold.
 const maxChargePercent = 100
+
+// SNMP request timeout bounds, in seconds; 0 selects the default.
+const (
+	defaultSNMPTimeoutSeconds = 2
+	maxSNMPTimeoutSeconds     = 60
+)
+
+// defaultShutdownCommand is the argv packaging/sudoers/* allows: both services
+// run as the non-root nut-server user, so a bare /sbin/shutdown would fail.
+var defaultShutdownCommand = []string{"/usr/bin/sudo", "-n", "/sbin/shutdown", "-h", "now"}
 
 // Units a runtime OID may report in; the master converts them to minutes.
 const (
@@ -293,11 +305,23 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.OfflineAfter.Duration == 0 {
 		cfg.OfflineAfter.Duration = 45 * time.Second
 	}
+	for _, d := range []struct {
+		key   string
+		value time.Duration
+	}{
+		{"poll_interval", cfg.PollInterval.Duration},
+		{"command_timeout", cfg.CommandTimeout.Duration},
+		{"offline_after", cfg.OfflineAfter.Duration},
+	} {
+		if d.value <= 0 {
+			return MasterConfig{}, fmt.Errorf("%s must be greater than zero", d.key)
+		}
+	}
 	if cfg.LocalShutdown.Enabled && cfg.LocalShutdown.Command != nil && len(cfg.LocalShutdown.Command) == 0 {
 		return MasterConfig{}, fmt.Errorf("local_shutdown.command must not be empty when local_shutdown.enabled is true")
 	}
 	if len(cfg.LocalShutdown.Command) == 0 {
-		cfg.LocalShutdown.Command = []string{"/sbin/shutdown", "-h", "now"}
+		cfg.LocalShutdown.Command = slices.Clone(defaultShutdownCommand)
 	}
 	// An explicit zero must fail rather than silently become the default.
 	if findKey(root, "local_shutdown", "max_wait") != nil && cfg.LocalShutdown.MaxWait.Duration <= 0 {
@@ -337,7 +361,10 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 		return MasterConfig{}, err
 	}
 	if cfg.SNMP.TimeoutSeconds == 0 {
-		cfg.SNMP.TimeoutSeconds = 2
+		cfg.SNMP.TimeoutSeconds = defaultSNMPTimeoutSeconds
+	}
+	if cfg.SNMP.TimeoutSeconds < 1 || cfg.SNMP.TimeoutSeconds > maxSNMPTimeoutSeconds {
+		return MasterConfig{}, fmt.Errorf("snmp.timeout_seconds must be between 1 and %d", maxSNMPTimeoutSeconds)
 	}
 	if err := ResolveSNMPVars(&cfg.SNMP); err != nil {
 		return MasterConfig{}, err
@@ -348,7 +375,7 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.LocalShutdown.UnreachableAfter.Duration == 0 {
 		cfg.LocalShutdown.UnreachableAfter = cfg.LocalShutdown.MaxWait
 	}
-	if err := normalizeShutdownPolicies(&cfg); err != nil {
+	if err := normalizeShutdownPolicies(&cfg, root); err != nil {
 		return MasterConfig{}, err
 	}
 	return cfg, nil
@@ -368,13 +395,25 @@ func validateInstallCAFile(cfg MasterConfig) error {
 	if !x509.NewCertPool().AppendCertsFromPEM(content) {
 		return fmt.Errorf("install_ca_file %s contains no PEM certificate", cfg.InstallCAFile)
 	}
-	return nil
+	// The file is served to anyone who can fetch the install script, so a
+	// bundled private key would leak.
+	for rest := content; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return nil
+		}
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("install_ca_file must contain only certificates; %s has a %q block", cfg.InstallCAFile, block.Type)
+		}
+	}
 }
 
-func normalizeShutdownPolicies(cfg *MasterConfig) error {
+func normalizeShutdownPolicies(cfg *MasterConfig, root *yaml.Node) error {
 	if len(cfg.ShutdownPolicies) == 0 {
 		return fmt.Errorf("shutdown_policies must define at least one policy")
 	}
+	nodes := sequenceItems(root, "shutdown_policies")
 	seen := make(map[string]struct{}, len(cfg.ShutdownPolicies))
 	for i, p := range cfg.ShutdownPolicies {
 		if p.Name == "" {
@@ -384,7 +423,11 @@ func normalizeShutdownPolicies(cfg *MasterConfig) error {
 			return fmt.Errorf("shutdown_policies[%d].name %q is duplicated", i, p.Name)
 		}
 		seen[p.Name] = struct{}{}
-		if err := validatePolicyConditions(p); err != nil {
+		var node *yaml.Node
+		if i < len(nodes) {
+			node = nodes[i]
+		}
+		if err := validatePolicyConditions(p, node); err != nil {
 			return fmt.Errorf("shutdown_policies[%d] (%s).%w", i, p.Name, err)
 		}
 		if !p.Target.All && len(p.Target.Tags) == 0 && len(p.Target.NodeIDs) == 0 {
@@ -398,11 +441,26 @@ func normalizeShutdownPolicies(cfg *MasterConfig) error {
 }
 
 // validatePolicyConditions returns errors starting with the offending key so
-// the caller can prefix the policy path.
-func validatePolicyConditions(p ShutdownPolicySpec) error {
+// the caller can prefix the policy path. node is the policy's YAML mapping
+// (nil when unknown) and tells an explicit zero from an absent key: a zero
+// condition would leave When empty, which fires on any battery reading.
+func validatePolicyConditions(p ShutdownPolicySpec, node *yaml.Node) error {
 	when := p.When
+	conditions := []struct {
+		key        string
+		isPositive bool
+	}{
+		{"charge_below", when.ChargeBelow > 0},
+		{"runtime_below", when.RuntimeBelow > 0},
+		{"ups_unreachable_for", when.UPSUnreachableFor.Duration > 0},
+	}
+	for _, c := range conditions {
+		if node != nil && findKey(node, "when", c.key) != nil && !c.isPositive {
+			return fmt.Errorf("when.%s must be greater than 0; remove it to fire on any battery reading", c.key)
+		}
+	}
 	if when.ChargeBelow < 0 || when.ChargeBelow > maxChargePercent {
-		return fmt.Errorf("when.charge_below must be between 0 and %d", maxChargePercent)
+		return fmt.Errorf("when.charge_below must be between 1 and %d", maxChargePercent)
 	}
 	if when.RuntimeBelow < 0 {
 		return fmt.Errorf("when.runtime_below must not be negative")
@@ -429,7 +487,8 @@ func validatePolicyConditions(p ShutdownPolicySpec) error {
 
 func LoadSlaveConfig(path string) (SlaveConfig, error) {
 	var cfg SlaveConfig
-	if _, err := loadYAML(path, &cfg, nil); err != nil {
+	root, err := loadYAML(path, &cfg, nil)
+	if err != nil {
 		return SlaveConfig{}, err
 	}
 	if cfg.NodeID == "" {
@@ -453,8 +512,11 @@ func LoadSlaveConfig(path string) (SlaveConfig, error) {
 	if err := cfg.TLS.ValidateClient(); err != nil {
 		return SlaveConfig{}, err
 	}
+	if findKey(root, "shutdown_command") != nil && len(cfg.ShutdownCommand) == 0 {
+		return SlaveConfig{}, fmt.Errorf("shutdown_command must not be empty; remove it to use the default %q", strings.Join(defaultShutdownCommand, " "))
+	}
 	if len(cfg.ShutdownCommand) == 0 {
-		cfg.ShutdownCommand = []string{"/sbin/shutdown", "-h", "now"}
+		cfg.ShutdownCommand = slices.Clone(defaultShutdownCommand)
 	}
 	if cfg.ShutdownCommandTimeout.Duration < 0 {
 		return SlaveConfig{}, fmt.Errorf("shutdown_command_timeout must not be negative")
@@ -558,6 +620,18 @@ func lookupKey(node *yaml.Node, path []string, label string) (*yaml.Node, string
 func findKey(root *yaml.Node, path ...string) *yaml.Node {
 	node, _ := lookupKey(root, path, "")
 	return node
+}
+
+// sequenceItems returns the items of the top-level sequence under key, or nil.
+func sequenceItems(root *yaml.Node, key string) []*yaml.Node {
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = root.Content[0]
+	}
+	_, value := mappingEntry(root, key)
+	if value == nil || value.Kind != yaml.SequenceNode {
+		return nil
+	}
+	return value.Content
 }
 
 func mappingEntry(node *yaml.Node, key string) (*yaml.Node, *yaml.Node) {

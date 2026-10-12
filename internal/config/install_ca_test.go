@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -44,5 +45,26 @@ func TestLoadMasterConfigRejectsInstallCAFileWithoutCertificate(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "install_ca_file") {
 		t.Fatalf("expected a non-PEM install_ca_file to fail, got %v", err)
+	}
+}
+
+func TestLoadMasterConfigRejectsInstallCAFileWithPrivateKey(t *testing.T) {
+	dir := t.TempDir()
+	caFile, certFile, keyFile := writeTLSFiles(t, dir, "master")
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		t.Fatalf("read ca: %v", err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+	bundle := writeTestFile(t, dir, "bundle.pem", string(caPEM)+string(keyPEM))
+	path := writeConfigFile(t, minimalMasterFields+defaultPolicy+tlsMasterFields(certFile, keyFile)+"install_ca_file: \""+bundle+"\"\n")
+
+	_, err = LoadMasterConfig(path)
+
+	if err == nil || !strings.Contains(err.Error(), "install_ca_file must contain only certificates") {
+		t.Fatalf("expected a private key in install_ca_file to fail, got %v", err)
 	}
 }

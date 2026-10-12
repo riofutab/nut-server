@@ -148,7 +148,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.runLocalShutdownSelfCheck(ctx)
-	adminTLS, err := loadAdminTLSConfig(s.cfg.AdminTLS)
+	adminTLS, err := s.cfg.AdminTLS.TLSConfig()
 	if err != nil {
 		return err
 	}

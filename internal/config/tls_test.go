@@ -35,6 +35,7 @@ func TestLoadMasterConfigWithTLS(t *testing.T) {
 		"  require_client_cert: true",
 		"snmp:",
 		"  target: \"192.168.1.10\"",
+		"  community: \"public\"",
 		"shutdown_policies:",
 		"  - name: on-battery",
 	}, "\n") + "\n"
@@ -77,6 +78,7 @@ func TestLoadMasterConfigRejectsIncompleteTLS(t *testing.T) {
 		"  cert_file: '" + filepath.ToSlash(certFile) + "'",
 		"snmp:",
 		"  target: \"192.168.1.10\"",
+		"  community: \"public\"",
 		"shutdown_policies:",
 		"  - name: on-battery",
 	}, "\n") + "\n"
@@ -305,6 +307,39 @@ func TestClientTLSConfigBuildsVerificationSettings(t *testing.T) {
 	}
 	if cfg.InsecureSkipVerify {
 		t.Fatalf("expected certificate verification to remain enabled")
+	}
+}
+
+func TestAdminTLSConfigLoadsKeyPair(t *testing.T) {
+	_, certFile, keyFile := writeTLSFiles(t, t.TempDir(), "admin.local")
+
+	cfg, err := AdminTLSConfig{CertFile: certFile, KeyFile: keyFile}.TLSConfig()
+
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	if cfg == nil || len(cfg.Certificates) != 1 || cfg.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("unexpected admin tls config %+v", cfg)
+	}
+}
+
+func TestAdminTLSConfigIsNilWhenUnset(t *testing.T) {
+	cfg, err := AdminTLSConfig{}.TLSConfig()
+
+	if err != nil || cfg != nil {
+		t.Fatalf("expected nil config and no error, got %+v, %v", cfg, err)
+	}
+}
+
+func TestAdminTLSConfigRejectsInvalidKeyPair(t *testing.T) {
+	dir := t.TempDir()
+	certFile := writeTestFile(t, dir, "admin.crt", "not a cert")
+	keyFile := writeTestFile(t, dir, "admin.key", "not a key")
+
+	_, err := AdminTLSConfig{CertFile: certFile, KeyFile: keyFile}.TLSConfig()
+
+	if err == nil || !strings.Contains(err.Error(), "admin_tls") {
+		t.Fatalf("expected admin_tls load error, got %v", err)
 	}
 }
 
