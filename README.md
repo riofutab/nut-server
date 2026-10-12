@@ -10,7 +10,7 @@
 
 ## Quick start
 
-v0.6.0 正式版发布前,`--version latest` 会装到 v0.5.1,它的安装脚本与本文档不一致,所以下面的命令固定使用 `--version v0.6.0-rc.1`。
+v0.6.0 正式版发布前,`--version latest` 会装到 v0.5.1,它的安装脚本与本文档不一致,所以下面的命令固定使用 `--version v0.6.0-rc.2`。
 
 在 master 主机一行装好(`--token-file` 指向存放 enrollment token 的文件,slave 首次注册时使用这个 token;`admin_token` 由脚本自动生成):
 
@@ -18,7 +18,7 @@ v0.6.0 正式版发布前,`--version latest` 会装到 v0.5.1,它的安装脚本
 sudo install -m 0600 /dev/null /root/nut-enroll-token
 openssl rand -hex 24 | sudo tee /root/nut-enroll-token   # 记下来,装 slave 时要用
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo bash -s -- --role master --version v0.6.0-rc.1 -- \
+  | sudo bash -s -- --role master --version v0.6.0-rc.2 -- \
       --token-file /root/nut-enroll-token \
       --snmp-target 10.0.0.31
 ```
@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/
 sudo install -m 0600 /dev/null /root/nut-enroll-token
 printf '%s\n' 'your-enrollment-token' | sudo tee /root/nut-enroll-token >/dev/null
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo bash -s -- --role slave --version v0.6.0-rc.1 -- \
+  | sudo bash -s -- --role slave --version v0.6.0-rc.2 -- \
       --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 
@@ -51,7 +51,7 @@ flowchart LR
 
 每台 slave 通过 TCP/TLS 长连接挂在 master 上,断线自动指数 backoff 重连;master 收到 UPS 触发条件后按多策略合并出 target 集合,并发下发 shutdown,等远端 `executed` 回执后(可选)再关本机。
 
-仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是预发布版 [v0.6.0-rc.1](https://github.com/riofutab/nut-server/releases/tag/v0.6.0-rc.1)。
+仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是预发布版 [v0.6.0-rc.2](https://github.com/riofutab/nut-server/releases/tag/v0.6.0-rc.2)。
 
 UPS 读取由 `snmp.profile` 决定 OID:默认 `ups-mib`(RFC 1628 UPS-MIB),另有 `apc` / `cyberpower` / `eaton`;单项 OID 可用 `snmp.on_battery` / `snmp.charge` / `snmp.runtime` 覆盖。
 
@@ -370,10 +370,10 @@ dry_run: true
 ```bash
 # 在线脚本会自动检测包管理器，下载已校验的 .deb 或 .rpm
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo sh -s -- --role master --version v0.6.0-rc.1
+  | sudo sh -s -- --role master --version v0.6.0-rc.2
 
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo sh -s -- --role slave --version v0.6.0-rc.1
+  | sudo sh -s -- --role slave --version v0.6.0-rc.2
 ```
 
 包安装会自动建 `nut-server` 用户、装 sudoers、把配置目录设为 `root:nut-server`（服务只读），并在 master 首次安装时随机生成 `admin_token` 写入 `/etc/nut-server/master.yaml`。安装完成后还需要改配置、以服务用户校验，再启动：
@@ -400,10 +400,10 @@ sudo systemctl enable --now nut-slave
 
 ```bash
 # token 文件只需 root 可读，内容是 master 的 enrollment token
-sudo ./scripts/install-online.sh --role master --version v0.6.0-rc.1 -- \
+sudo ./scripts/install-online.sh --role master --version v0.6.0-rc.2 -- \
   --token-file /root/nut-enroll-token --snmp-target 10.0.0.31
 
-sudo ./scripts/install-online.sh --role slave --version v0.6.0-rc.1 -- \
+sudo ./scripts/install-online.sh --role slave --version v0.6.0-rc.2 -- \
   --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 

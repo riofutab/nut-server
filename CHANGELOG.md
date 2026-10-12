@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-计划发布为 v0.6.0,预发布版 v0.6.0-rc.1 供实机验证。所有破坏性配置变更集中在这一版,并包含下方 0.5.2 的全部修复(0.5.2 未单独发布)。**master 配置必须改写;先升 master 再升 slave。**逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
+计划发布为 v0.6.0,预发布版 v0.6.0-rc.2 供实机验证(取代 v0.6.0-rc.1)。所有破坏性配置变更集中在这一版,并包含下方 0.5.2 的全部修复(0.5.2 未单独发布)。**master 配置必须改写;先升 master 再升 slave。**逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
 
 ### Added
 - **per-node token**:slave 首次用 `enrollment_tokens` 注册后,master 签发专属 token,只保存其 SHA-256;此后该 node_id 只能用专属 token 注册,共享 token 不能再冒用已注册节点。`enrollment: closed` 拒绝新节点;`DELETE /nodes/{node_id}/token` 吊销。`/status` 新增 `enrolled`。
@@ -56,7 +56,7 @@
 - `install_ca_file` 只能包含 `CERTIFICATE` PEM 块,装机脚本只内嵌证书。
 - `install-master.sh` 拒绝符号链接形式的 `master.yaml`,不再以 root 改写、chown、chmod 链接目标。
 - `install-online.sh` 的错误信息改输出到 stderr;`/releases/latest` 请求失败(例如只有预发布版)时提示传 `--version`。
-- 文档:quick start 固定 `--version v0.6.0-rc.1`(正式版前 `latest` 指向 v0.5.1);装机脚本只在 master 上用 `admin_token` 生成;`local_shutdown` 示例的 `emergency_runtime_minutes` 改为低于策略阈值并写明 sudo 关机命令;去掉已移除的 `RestrictAddressFamilies`;Go 徽章改为 1.26。
+- 文档:quick start 固定 `--version v0.6.0-rc.2`(正式版前 `latest` 指向 v0.5.1);装机脚本只在 master 上用 `admin_token` 生成;`local_shutdown` 示例的 `emergency_runtime_minutes` 改为低于策略阈值并写明 sudo 关机命令;去掉已移除的 `RestrictAddressFamilies`;Go 徽章改为 1.26。
 
 ### Removed
 - `auth_tokens`(改名 `enrollment_tokens`)、旧格式 `shutdown_policy`、`when.on_battery`、`snmp.output_source_oid` / `charge_oid` / `runtime_minutes_oid`、`GET /install/slave`。配置改为严格解析,未知字段启动报错。
