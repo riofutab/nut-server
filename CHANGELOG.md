@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-计划发布为 v0.6.0。所有破坏性配置变更集中在这一版。**master 配置必须改写；升级顺序：先 slave 后 master**（master 需已是 v0.5.2）。逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
+计划发布为 v0.6.0。所有破坏性配置变更集中在这一版。**master 配置必须改写**；master 与 slave 升级不分先后（两边需已是 v0.5.2）。逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
 
 ### Added
 - **per-node token**:slave 首次用 `enrollment_tokens` 注册后,master 签发专属 token,只保存其 SHA-256;此后该 node_id 只能用专属 token 注册,共享 token 不能再冒用已注册节点。`enrollment: closed` 拒绝新节点;`DELETE /nodes/{node_id}/token` 吊销。`/status` 新增 `enrolled`。
@@ -14,6 +14,7 @@
 - **UPS 失联兜底**:策略条件 `when.ups_unreachable_for`;`local_shutdown.unreachable_after`(缺省等于 `max_wait`)在断电期间 UPS 失联时按紧急处理关 master,触发原因 `ups_unreachable`。
 - **HTTPS admin** `admin_tls`(最低 TLS 1.2);admin 绑非回环地址又没配 TLS 时启动打 WARN。
 - **SNMP profile**(`ups-mib` 默认 / `apc` / `cyberpower` / `eaton`)与单项覆盖,runtime 支持 minutes / seconds / timeticks;**支持 SNMPv3**(USM)。厂商 profile 尚未经真机验证。
+- `install_ca_file`:装机脚本内嵌的 CA,设为签发 master 证书的 CA 后,master 换证书不用改 slave;未设置时沿用 `tls.cert_file`。
 - **`-check-config`**:nut-master / nut-slave 只校验配置和关机权限后退出;安装与升级脚本在启动前调用,不通过则中止且保留旧版本。
 
 ### Changed
@@ -22,6 +23,10 @@
 - token 比较先做 SHA-256 再逐个恒定时间比较,不再泄露长度。
 - slave state 文件改为结构化格式(含签发的 token),旧文件的已处理命令记录丢弃一次。
 - 指标 `nut_master_register_attempts_total` 新增 `result="enrolled"`。
+- 签发的 token 只在 slave 回复 `token_stored` 后生效,旧版 slave 不受影响,继续用 enrollment token 注册。
+
+### Fixed
+- `.deb` / `.rpm` 升级时不再停止并 disable 服务;postinst 在配置通过 `-check-config` 后重启正在运行的服务,不通过则保留旧进程并告警。
 
 ### Removed
 - `auth_tokens`(改名 `enrollment_tokens`)、旧格式 `shutdown_policy`、`when.on_battery`、`snmp.output_source_oid` / `charge_oid` / `runtime_minutes_oid`、`GET /install/slave`。配置改为严格解析,未知字段启动报错。

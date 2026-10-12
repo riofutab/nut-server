@@ -29,11 +29,13 @@ sudo ./scripts/upgrade-slave.sh
 
 v0.6.0 集中做了所有破坏性配置变更。master 的配置必须改写，slave 的配置不用改。
 
-### 升级顺序：先 slave，后 master
+### 升级顺序
 
-1. **master 必须已经是 v0.5.2。** 更早的 master 不认识 slave 回报的 `simulated` 状态。
-2. **先把所有 slave 升到 v0.6.0。** 新 slave 连旧 master 时照常用配置里的 `token` 注册，不受影响。
-3. **最后升 master。** 反过来会出问题：v0.6.0 master 会给首次注册的节点签发专属 token，旧 slave 不认识这个字段，不会保存，但 master 已经记下了；旧 slave 下次重连仍用 enrollment token，会一直被拒（`invalid token`）。出现这种情况时，先升级该 slave，再 `DELETE /nodes/<node_id>/token` 吊销，它会用 enrollment token 重新注册。
+master 和 slave 谁先升都可以，前提是两边都已经是 v0.5.2（v0.5.2 的 slave 在 dry-run 下回报 `simulated`，更早的 master 不认识）。
+
+- 新 slave 连旧 master：照常用配置里的 `token` 注册。
+- 旧 slave 连新 master：master 在 `register_ack` 里签发的 token 只有在 slave 回复 `token_stored` 后才生效。旧 slave 不会回复，所以它继续用 enrollment token 注册，`/status` 里显示为未注册（`enrolled: false`）。
+- 所有 slave 都升级并显示 `enrolled: true` 之后，才可以把 `enrollment` 改成 `closed`，否则未升级的 slave 会被拒（`enrollment closed`）。
 
 ### master 配置逐字段对照
 
@@ -59,7 +61,8 @@ sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-serv
 ### 升级方式的差别
 
 - **tar.gz 升级脚本**：先装 sudoers，再把新二进制放到临时位置，以 `nut-server` 用户（`runuser`，Debian/RHEL 系自带）跑 `-check-config`。不通过就删掉临时文件、保留旧二进制、不重启，并以退出码 1 结束。所以要先改好配置再跑升级脚本。
-- **`.deb` / `.rpm`**：包的 prerm 会停止并 disable 服务，postinst 不会启动它。装完新包、改好配置、`-check-config` 通过后，执行 `sudo systemctl enable --now nut-master`（slave 同理）。
+- **`.deb` / `.rpm`**：v0.6.0 起，升级包时服务保持 enable；如果服务在运行，postinst 以 `nut-server` 用户跑 `-check-config`，通过就重启到新版本，不通过就不重启并打印警告，旧进程继续运行（但重启机器后会起不来）。所以同样要先改好配置再装包。
+  - 例外：从 v0.5.2 的包升级时，执行的是 v0.5.2 包里的旧 prerm，它仍会停止并 disable 服务。这一次装完新包、改好配置、`-check-config` 通过后，需要手动执行 `sudo systemctl enable --now nut-master`（slave 同理）。
 
 ### per-node token 带来的行为变化
 

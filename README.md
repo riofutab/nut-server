@@ -198,6 +198,7 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `admin_tls.cert_file` / `admin_tls.key_file`（v0.6.0+）：两项同时设置时 admin 口改为 HTTPS（最低 TLS 1.2），状态页、API、`/metrics` 都走 https；两项都留空为明文 HTTP，只设一项会启动失败。证书只在启动时加载，换证书要重启
 - `public_addr`: 装机脚本里写给 slave 的 `master_addr`；master 开了 TLS 时，它的主机名也作为脚本里的 `--tls-server-name`。留空时取请求的 Host header 加 `listen_addr` 端口
 - `install_repo`: 装机脚本拉取 `install-online.sh` 的 GitHub 仓库，留空为 `riofutab/nut-server`
+- `install_ca_file`: 装机脚本写给 slave 的 CA（仅 `tls` 开启时可用）。建议填签发 master 证书的 CA，master 换证书时 slave 不用改；留空时内嵌 `tls.cert_file`
 - `state_file`: master 本地状态文件，保存 active command、节点回执、节点目录和各节点专属 token 的 SHA-256，便于重启恢复
 - `enrollment_tokens`（v0.6.0+）：slave 首次注册用的 token 列表。某个 `node_id` 首次注册成功后，master 给它签发专属 token，之后该 `node_id` 只能用专属 token 注册
 - `enrollment`（v0.6.0+）：`open`（默认）或 `closed`。`closed` 时新 `node_id` 注册会被拒（`enrollment closed`），已签发 token 的节点不受影响；`closed` 时 `enrollment_tokens` 可以留空

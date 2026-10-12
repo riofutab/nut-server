@@ -52,7 +52,7 @@ curl -s .../metrics | grep nut_slave_connect_attempts_total
   - 用装机脚本安装的节点被吊销后:它配置里的 `token` 就是被吊销的专属 token,没有可回退的 enrollment token,会一直被拒。在 master 上重新生成装机脚本并在该节点执行。
   - 另外,用装机脚本重新生成 token 会让该节点旧的 token 失效并断开连接,直到新脚本执行完。
 - **slave 日志 `store issued token: ...`**:slave 无法把 master 签发的 token 写进 `state_file`,会断开重试。检查 `state_file` 路径是否可写(随包配置为 `/var/lib/nut-server/slave-state.json`)。
-- **状态页节点标 `not enrolled`**:节点已连接,但 master 还没记下它的专属 token。正常情况下 slave 确认收到 token 后标记会消失;一直存在时看 master 日志 `discard issued token`。
+- **状态页节点标 `not enrolled`**:节点已连接,但 master 还没记下它的专属 token。正常情况下 slave 回复 `token_stored` 后标记会消失。一直存在时:slave 还是 v0.6.0 之前的版本(不会回复,继续用 enrollment token,升级即可),或看 master 日志 `discard issued token`。
 - **地址/端口不通**:`dial tcp ... connection refused`。检查 `master_addr`、防火墙、master 的 `listen_addr`。
 - **TLS 配置不对称**:一端开 TLS 另一端没开 → 握手失败。见下方 *TLS / mTLS 握手失败*。
 - **node_id 与证书不匹配**(开启了 `tls.bind_node_id_to_cert`):master 日志 `client cert identity mismatch`。slave 证书的 CN 或 DNS SAN 必须等于其 `node_id`。
@@ -159,6 +159,6 @@ curl -s .../status | jq '.local_shutdown'   # phase / trigger / last_error
 
 - v0.4.0+:占位 token 会**拒绝启动** —— 升级前先换成强随机值。
 - v0.5.0+:新增 `/healthz`、`/readyz`、`shutdown_command_timeout`、若干 SLI 指标(`shutdown_ack_latency_seconds`、`ups_poll_duration_seconds`、`ups_last_*_timestamp_seconds`)。全部向后兼容,留空走默认。
-- v0.6.0+:配置严格解析并删除旧字段,master 配置必须改写;slave 改用专属 token;`GET /install/slave` 改为 `POST /nodes/<node_id>/install-script`;安装脚本的 `--token` 改为 `--token-file`。升级顺序是先 slave 后 master,反过来旧 slave 会被拒(`invalid token`)。
+- v0.6.0+:配置严格解析并删除旧字段,master 配置必须改写;slave 改用专属 token;`GET /install/slave` 改为 `POST /nodes/<node_id>/install-script`;安装脚本的 `--token` 改为 `--token-file`。master 与 slave 升级不分先后;未升级的 slave 继续用 enrollment token 注册,全部升级并显示 `enrolled: true` 后再把 `enrollment` 改成 `closed`。
 
 升级流程见 [upgrade.md](upgrade.md)。

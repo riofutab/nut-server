@@ -107,7 +107,7 @@ scrape_configs:
 
 ## 节点注册与专属 token
 
-- slave 第一次注册时使用 `enrollment_tokens` 里的任一 token。注册成功后，master 在 `register_ack` 里给该 `node_id` 签发一个专属 token（64 位十六进制），state 文件（`node_tokens`）里只保存它的 SHA-256。slave 把 token 存进自己的 `state_file`，之后都用它注册。
+- slave 第一次注册时使用 `enrollment_tokens` 里的任一 token。注册成功后，master 在 `register_ack` 里给该 `node_id` 签发一个专属 token（64 位十六进制），state 文件（`node_tokens`）里只保存它的 SHA-256。slave 把 token 存进自己的 `state_file` 后回复 `token_stored`，master 收到这条消息才记下 token；之后该节点都用它注册。v0.6.0 之前的 slave 不会回复，会继续用 enrollment token 注册。
 - 一个 `node_id` 有了专属 token 之后，enrollment token 就不能再以这个 `node_id` 注册，会被拒绝（`invalid token`）。
 - `enrollment: open`（默认）允许新 `node_id` 注册。所有节点都注册过以后建议改成 `closed`，此时新 `node_id` 会被拒（`enrollment closed`），泄漏的 enrollment token 也就没用了；`closed` 时 `enrollment_tokens` 可以留空。改动需要重启 master。
 - token 校验时两边都先做 SHA-256，再对所有候选做恒定时间比较。
@@ -156,7 +156,7 @@ curl -fsS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 - 把 `node_id` 标记为预期节点（`expected`）；
 - 给该节点签发新的专属 token，替换旧 token，并断开该节点当前的连接（旧 token 已失效）；
 - 生成脚本：脚本把 token 用 heredoc 写到权限 0600 的临时文件，以 `--token-file` 传给安装脚本，token 不出现在命令行参数里；
-- master 的 `tls` 开启时，把 `tls.cert_file` 的内容内嵌进脚本作为 CA（`--tls-ca-file`，安装后在 `/etc/nut-server/ca.crt`），并用脚本里 `master_addr` 的主机名（配了 `public_addr` 时即其主机名）作为 `--tls-server-name`，所以 master 证书的 SAN 要包含这个主机名；只有 master 没开 TLS 时脚本才带 `--disable-tls`。
+- master 的 `tls` 开启时，把 `install_ca_file`（未配置时用 `tls.cert_file`）的内容内嵌进脚本作为 CA（`--tls-ca-file`，安装后在 `/etc/nut-server/ca.crt`；建议配置为签发 master 证书的 CA，换证书时 slave 不用改，见 [tls.md](tls.md)），并用脚本里 `master_addr` 的主机名（配了 `public_addr` 时即其主机名）作为 `--tls-server-name`，所以 master 证书的 SAN 要包含这个主机名；只有 master 没开 TLS 时脚本才带 `--disable-tls`。
 
 脚本下载 `install-online.sh` 时固定使用 master 自己的 release tag，安装的 slave 与 master 同版本。没有 release tag 的开发构建会返回 `503`。
 

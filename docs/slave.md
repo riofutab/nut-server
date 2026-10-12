@@ -56,7 +56,7 @@ sudo ./scripts/install-online.sh --role slave --version latest -- \
 ## token 的生命周期
 
 1. **首次注册**：slave 用配置里的 `token`（master 的 enrollment token）注册。master 接受后在 `register_ack` 里返回为这个 `node_id` 签发的专属 token。
-2. **保存**：slave 先把专属 token 写进 `state_file`（0600），再继续通信；写不进去就断开重连，不会使用一个可能丢失的 token。所以 `state_file` 必须可写（随包配置是 `/var/lib/nut-server/slave-state.json`）。
+2. **保存**：slave 先把专属 token 写进 `state_file`（0600），再回复 master `token_stored`，master 收到后才记下这个 token；写不进去就断开重连，不会使用一个可能丢失的 token。所以 `state_file` 必须可写（随包配置是 `/var/lib/nut-server/slave-state.json`）。
 3. **之后的注册**：`state_file` 里有专属 token 时优先用它，配置里的 `token` 不再使用。此后 enrollment token 不能再以这个 `node_id` 注册。
 4. **回退**：如果 master 以 `invalid token` 拒绝了存储的专属 token（被吊销，或 master 的 state 文件丢失），slave 清掉它，下次重连改用配置里的 `token` 重新注册。master 的 `enrollment` 为 `closed` 时这一步会被拒（`enrollment closed`），需要先在 master 上改回 `open`。
 
