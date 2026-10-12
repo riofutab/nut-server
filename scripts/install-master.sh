@@ -6,8 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 LISTEN_ADDR=":9000"
 ADMIN_LISTEN_ADDR="127.0.0.1:9001"
-ADMIN_TOKEN=""
-TOKEN=""
+TOKEN_FILE=""
 SNMP_TARGET=""
 SNMP_COMMUNITY="public"
 TLS_CERT_FILE=""
@@ -19,11 +18,14 @@ TLS_DISABLED="false"
 
 usage() {
   cat <<'EOF'
-usage: install-master.sh --token <enrollment-token> --snmp-target <host> [--admin-token <token>] [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
+usage: install-master.sh --token-file <path> --snmp-target <host> [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
 
-  --token <token>                enrollment token new slaves first register with; each node
-                                 is then issued its own token. Create per-node install
-                                 scripts with POST /nodes/<node_id>/install-script.
+  --token-file <path>            file holding the enrollment token new slaves first register
+                                 with (kept off the command line); each node is then issued
+                                 its own token. Create per-node install scripts with
+                                 POST /nodes/<node_id>/install-script.
+
+  admin_token is generated on first install and kept in master.yaml.
 
 TLS:
   --disable-tls                  force plain TCP and ignore all TLS certificate settings
@@ -44,12 +46,8 @@ while [ "$#" -gt 0 ]; do
       ADMIN_LISTEN_ADDR="$2"
       shift 2
       ;;
-    --token)
-      TOKEN="$2"
-      shift 2
-      ;;
-    --admin-token)
-      ADMIN_TOKEN="$2"
+    --token-file)
+      TOKEN_FILE="$2"
       shift 2
       ;;
     --snmp-target)
@@ -97,9 +95,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "$TOKEN" ] || [ -z "$SNMP_TARGET" ]; then
-  echo "--token and --snmp-target are required"
+if [ -z "$TOKEN_FILE" ] || [ -z "$SNMP_TARGET" ]; then
+  echo "--token-file and --snmp-target are required"
   usage
+  exit 1
+fi
+if [ ! -r "$TOKEN_FILE" ]; then
+  echo "--token-file $TOKEN_FILE is not readable" >&2
+  exit 1
+fi
+TOKEN=$(cat "$TOKEN_FILE")
+if [ -z "$TOKEN" ]; then
+  echo "--token-file $TOKEN_FILE is empty" >&2
   exit 1
 fi
 
@@ -115,8 +122,7 @@ reject_unsafe() {
   esac
 }
 
-reject_unsafe "--token" "$TOKEN" 'a-zA-Z0-9_.\-'
-reject_unsafe "--admin-token" "$ADMIN_TOKEN" 'a-zA-Z0-9_.\-'
+reject_unsafe "--token-file contents" "$TOKEN" 'a-zA-Z0-9_.\-'
 reject_unsafe "--snmp-target" "$SNMP_TARGET" 'a-zA-Z0-9_.\-:'
 reject_unsafe "--snmp-community" "$SNMP_COMMUNITY" 'a-zA-Z0-9_.\-'
 reject_unsafe "--listen-addr" "$LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
@@ -215,7 +221,14 @@ done
 install -d -o root -g nut-server -m 0750 /etc/nut-server
 install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
 chown -R nut-server:nut-server /var/lib/nut-server
-install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-master
+
+# The script appends to, chowns and chmods the config as root; refuse a symlink
+# rather than modify its target.
+CONFIG_PATH="/etc/nut-server/master.yaml"
+if [ -L "$CONFIG_PATH" ]; then
+  echo "$CONFIG_PATH must not be a symbolic link" >&2
+  exit 1
+fi
 
 # Install the master sudoers entry so an opt-in local_shutdown (master powers
 # itself off last) can run /sbin/shutdown as the non-root nut-server user.
@@ -232,26 +245,15 @@ random_token() {
   head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32
 }
 
-CONFIG_PATH="/etc/nut-server/master.yaml"
 if [ -f "$CONFIG_PATH" ]; then
   echo "config $CONFIG_PATH already exists, skipping generation"
-  if grep -q '^admin_token:' "$CONFIG_PATH"; then
-    if [ -n "$ADMIN_TOKEN" ]; then
-      sed -i "s|^admin_token:.*|admin_token: \"$ADMIN_TOKEN\"|" "$CONFIG_PATH"
-      echo "rotated admin_token in existing master.yaml"
-    fi
-  else
-    if [ -z "$ADMIN_TOKEN" ]; then
-      ADMIN_TOKEN=$(random_token)
-    fi
-    printf '\nadmin_token: "%s"\n' "$ADMIN_TOKEN" >> "$CONFIG_PATH"
+  if ! grep -q '^admin_token:' "$CONFIG_PATH"; then
+    printf '\nadmin_token: "%s"\n' "$(random_token)" >> "$CONFIG_PATH"
     echo "added admin_token to existing master.yaml"
   fi
 else
-  if [ -z "$ADMIN_TOKEN" ]; then
-    ADMIN_TOKEN=$(random_token)
-    echo "generated admin_token; see $CONFIG_PATH"
-  fi
+  ADMIN_TOKEN=$(random_token)
+  echo "generated admin_token; see $CONFIG_PATH"
   cat > "$CONFIG_PATH" <<EOF
 listen_addr: "$LISTEN_ADDR"
 admin_listen_addr: "$ADMIN_LISTEN_ADDR"
@@ -296,14 +298,39 @@ fi
 chown root:nut-server "$CONFIG_PATH"
 chmod 0640 "$CONFIG_PATH"
 
+# The new binary checks the config before it replaces the installed one, so a
+# config it rejects leaves a running nut-master on its current version. The
+# check runs as the service user so its sudo self-check sees the service's
+# sudoers rules.
+staged="/usr/local/bin/.nut-master.new"
+install -m 0755 "$BIN_SOURCE" "$staged"
+if ! runuser -u nut-server -- "$staged" -check-config -config "$CONFIG_PATH"; then
+  rm -f "$staged"
+  echo "config check failed; binary not replaced. Fix $CONFIG_PATH (see docs/upgrade.md) and run this script again" >&2
+  exit 1
+fi
+mv -f "$staged" /usr/local/bin/nut-master
+
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-master.service
 systemctl daemon-reload
 
-if ! runuser -u nut-server -- /usr/local/bin/nut-master -check-config -config "$CONFIG_PATH"; then
-  echo "config check failed; fix $CONFIG_PATH before starting nut-master (see docs/upgrade.md)" >&2
-  exit 1
-fi
-
 echo "installed nut-master"
-echo "run: systemctl enable --now nut-master"
-echo "then, per slave: curl -fsS -X POST -H \"Authorization: Bearer <admin_token>\" http://$ADMIN_LISTEN_ADDR/nodes/<node_id>/install-script | bash"
+if systemctl is-active --quiet nut-master; then
+  systemctl restart nut-master
+  echo "restarted nut-master"
+else
+  echo "run: systemctl enable --now nut-master"
+fi
+cat <<EOF
+
+To install a slave:
+  1. Set public_addr in $CONFIG_PATH to the address slaves use to reach this
+     master, then restart nut-master.
+  2. On this master, generate the slave's install script:
+       TOKEN=\$(sudo awk '/^admin_token:/ {print \$2}' $CONFIG_PATH | tr -d '"')
+       curl -fsS -X POST -H "Authorization: Bearer \$TOKEN" \\
+         http://$ADMIN_LISTEN_ADDR/nodes/<node_id>/install-script -o install-<node_id>.sh
+  3. Copy install-<node_id>.sh to the slave, run it there with
+     "bash install-<node_id>.sh" as a user with sudo rights, then delete it.
+See docs/master.md.
+EOF

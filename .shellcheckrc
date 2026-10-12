@@ -1,0 +1,2 @@
+# The scripts run `CDPATH= cd ...` to clear CDPATH for that one command.
+disable=SC1007
