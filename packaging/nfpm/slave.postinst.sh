@@ -38,6 +38,26 @@ chmod 0640 /etc/nut-server/slave.yaml
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
+  # Upgrade of a running service: restart onto the new binary only when the
+  # existing config passes its checks (as the service user, since sudo checks
+  # always pass for root). Otherwise the old process keeps running.
+  if systemctl is-active --quiet nut-slave; then
+    if runuser -u nut-server -- /usr/local/bin/nut-slave -check-config -config /etc/nut-server/slave.yaml; then
+      systemctl restart nut-slave
+      echo "nut-slave restarted on the new version."
+    else
+      cat >&2 <<'EOF'
+
+WARNING: /etc/nut-server/slave.yaml does not pass the new version's checks.
+nut-slave was NOT restarted and is still running the previous version from memory;
+it will fail to start after a reboot. Fix the config (see docs/upgrade.md), then:
+  sudo -u nut-server /usr/local/bin/nut-slave -check-config -config /etc/nut-server/slave.yaml
+  sudo systemctl restart nut-slave
+
+EOF
+    fi
+    exit 0
+  fi
 fi
 
 cat <<'EOF'

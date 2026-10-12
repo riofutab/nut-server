@@ -104,7 +104,7 @@ jobs:
           sudo install -o root -g nut-server -m 0640 /tmp/slave.yaml /etc/nut-server/slave.yaml
           rm -f /tmp/slave.yaml
           sudo -u nut-server /usr/local/bin/nut-slave -check-config -config /etc/nut-server/slave.yaml
-          sudo systemctl start nut-slave
+          sudo systemctl enable --now nut-slave
 
       - name: Install and start nut-master
         run: |
@@ -145,7 +145,7 @@ jobs:
           sudo install -o root -g nut-server -m 0640 /tmp/master.yaml /etc/nut-server/master.yaml
           rm -f /tmp/master.yaml
           sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
-          sudo systemctl start nut-master
+          sudo systemctl enable --now nut-master
 
       - name: Check shutdown command self-check
         run: |
@@ -172,4 +172,28 @@ jobs:
           status=0
           wait_self_check nut-slave || status=1
           wait_self_check nut-master || status=1
+          exit "$status"
+
+      - name: Upgrade in place keeps services enabled and restarts them
+        run: |
+          status=0
+          for role in slave master; do
+            unit="nut-$role"
+            before=$(systemctl show -p InvocationID --value "$unit")
+            out=$(sudo dpkg -i "dist/release/nut-${role}_0.0.0-ci_linux_amd64.deb" 2>&1) || status=1
+            printf '%s\n' "$out"
+            after=$(systemctl show -p InvocationID --value "$unit")
+            if ! systemctl is-active --quiet "$unit"; then
+              echo "::error::$unit is not running after the upgrade"
+              status=1
+            fi
+            if ! systemctl is-enabled --quiet "$unit"; then
+              echo "::error::$unit is no longer enabled after the upgrade"
+              status=1
+            fi
+            if [ "$before" = "$after" ]; then
+              echo "::error::$unit was not restarted onto the new binary"
+              status=1
+            fi
+          done
           exit "$status"
