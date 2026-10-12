@@ -36,15 +36,18 @@ func (s *Server) evaluateUPS(polledAt time.Time) error {
 	}
 	s.recordUPSSuccess(status, polledAt)
 	recordUPSPollResult(true)
-	s.upsConfirmed.Store(true)
+	// upsConfirmed is set only after a restored episode was ended or kept, so
+	// a reconnecting slave never sees a stale episode as confirmed.
 	if !status.OnBattery {
 		s.endEpisodeOnLinePower()
+		s.upsConfirmed.Store(true)
 		return nil
 	}
 	// Policies are only evaluated while on battery: on line power the nodes are
 	// powered, and a charge/runtime threshold there would shut down nodes that
 	// boot back up while the battery recharges.
 	s.startEpisodeIfNeeded(polledAt)
+	s.upsConfirmed.Store(true)
 	s.evaluateEpisodePolicies(&status, polledAt)
 	return nil
 }

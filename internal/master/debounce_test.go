@@ -295,7 +295,7 @@ func TestLocalShutdownPowersOffMasterForRestoredEpisodeWhenUPSNeverAnswers(t *te
 	}
 }
 
-func TestRestoredEpisodeCommandIsRetriedOnceUnreachableFallbackFires(t *testing.T) {
+func TestRestoredEpisodeCommandIsReplayedOnReconnectOnceUnreachableFallbackFires(t *testing.T) {
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 	server, ups := restartedServer(t, config.MasterConfig{
 		ShutdownPolicies: []config.ShutdownPolicySpec{

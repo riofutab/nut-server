@@ -298,17 +298,25 @@ func (s *Server) replayPendingShutdown(client *Client) error {
 	return client.Send(protocol.TypeShutdown, message)
 }
 
+// ResetActiveCommand cancels the active command and any local shutdown that is
+// not already running. During an outage the episode is kept with its fired
+// policies, so they do not fire again at the next poll; policies that have not
+// fired yet and the emergency still apply.
 func (s *Server) ResetActiveCommand() {
 	s.commandMu.Lock()
-	clearedCommand := s.activeCommand
 	if command, ok := s.commands[s.activeCommand]; ok && command != nil {
 		command.ReplayDisabled = true
 	}
-	if s.localShutdown != nil && s.localShutdown.CommandID == clearedCommand && !localShutdownTerminal(s.localShutdown.Phase) {
+	if s.episode != nil {
+		if command, ok := s.commands[s.episode.CommandID]; ok {
+			command.ReplayDisabled = true
+		}
+		s.episode.CommandID = ""
+	}
+	if s.localShutdown != nil && s.localShutdown.Phase != protocol.LocalShutdownPhaseExecuting {
 		s.localShutdown = nil
 	}
 	s.activeCommand = ""
-	s.episode = nil
 	s.shutdownIssued.Store(false)
 	seq, content := s.snapshotStateLocked()
 	s.commandMu.Unlock()

@@ -21,6 +21,11 @@ type autoEpisode struct {
 	StartedAt     time.Time `json:"started_at"`
 	CommandID     string    `json:"command_id,omitempty"`
 	FiredPolicies []string  `json:"fired_policies,omitempty"`
+	// MasterPoweredOff is set once a real local shutdown starts in this
+	// episode. A master that boots with it set waits for a UPS reading before
+	// any unreachable fallback: it usually boots because power came back, and a
+	// UPS card that is still starting is not an outage.
+	MasterPoweredOff bool `json:"master_powered_off,omitempty"`
 	// matchSince records when each debounced policy started matching. It is
 	// not persisted: after a restart the timers start over, which delays a
 	// shutdown rather than firing one on readings taken before the restart.
@@ -68,7 +73,7 @@ func (s *Server) endEpisodeOnLinePower() {
 				s.shutdownIssued.Store(false)
 			}
 		}
-		if s.localShutdown != nil && s.localShutdown.CommandID == commandID && !localShutdownTerminal(s.localShutdown.Phase) {
+		if s.localShutdownBelongsToEpisodeLocked() && s.localShutdown.Phase != protocol.LocalShutdownPhaseExecuting {
 			s.localShutdown = nil
 		}
 		s.episode = nil
@@ -107,7 +112,7 @@ func (s *Server) evaluateEpisodePolicies(reading *UPSStatus, now time.Time) {
 
 	s.commandMu.Lock()
 	episode := s.episode
-	if episode == nil {
+	if episode == nil || reading == nil && s.awaitingReadingAfterPowerOffLocked() {
 		s.commandMu.Unlock()
 		return
 	}
@@ -119,14 +124,19 @@ func (s *Server) evaluateEpisodePolicies(reading *UPSStatus, now time.Time) {
 		unreachableFired bool
 	)
 	for _, p := range s.cfg.ShutdownPolicies {
-		if slices.Contains(episode.FiredPolicies, p.Name) {
-			continue
-		}
+		fired := slices.Contains(episode.FiredPolicies, p.Name)
 		if unreachableFor := p.When.UPSUnreachableFor.Duration; unreachableFor > 0 {
 			if reading == nil && silentFor >= unreachableFor {
-				due = append(due, p.Name)
+				// A policy that fired before a restart still vouches for the
+				// restored episode while the UPS stays silent.
 				unreachableFired = true
+				if !fired {
+					due = append(due, p.Name)
+				}
 			}
+			continue
+		}
+		if fired {
 			continue
 		}
 		if reading == nil {
@@ -286,9 +296,17 @@ func (s *Server) reopenCommandLocked(command *shutdownCommandState, now time.Tim
 
 // armLocalShutdownLocked starts the "wait for remotes, then power off the
 // master" flow for a command that targets every node. Commands scoped to tags
-// or node IDs never power off the master.
+// or node IDs never power off the master. A local shutdown left by another
+// command, such as a finished dry-run drill, is replaced; one that is running,
+// already follows this command, or was armed by an emergency of the current
+// episode is kept.
 func (s *Server) armLocalShutdownLocked(command *shutdownCommandState, now time.Time) {
-	if !s.cfg.LocalShutdown.Enabled || s.localShutdown != nil || !command.Message.Target.All {
+	if !s.cfg.LocalShutdown.Enabled || !command.Message.Target.All {
+		return
+	}
+	if current := s.localShutdown; current != nil && (current.Phase == protocol.LocalShutdownPhaseExecuting ||
+		current.CommandID == command.Message.CommandID ||
+		current.CommandID == "" && s.episode != nil) {
 		return
 	}
 	startedAt := now
@@ -306,7 +324,10 @@ func (s *Server) armLocalShutdownLocked(command *shutdownCommandState, now time.
 }
 
 // retryEpisodeShutdown re-sends the episode command to targets whose last
-// status is failed or timeout, at most once per shutdownRetryInterval.
+// status is failed or timeout, at most once per shutdownRetryInterval. It also
+// adopts connected nodes that match the target but are not tracked yet, such as
+// a node that reconnected after a restart before the first UPS reading, when
+// the restored command could not be replayed to it.
 func (s *Server) retryEpisodeShutdown(now time.Time) {
 	s.commandMu.Lock()
 	if s.episode == nil || !s.upsConfirmed.Load() || now.Sub(s.lastNodeRetryAt) < shutdownRetryInterval {
@@ -325,13 +346,20 @@ func (s *Server) retryEpisodeShutdown(now time.Time) {
 			nodeIDs[nodeID] = struct{}{}
 		}
 	}
+	for _, client := range s.adoptMatchingClientsLocked(command, now) {
+		nodeIDs[client.NodeID] = struct{}{}
+	}
 	if len(nodeIDs) == 0 {
 		s.commandMu.Unlock()
 		return
 	}
 	s.lastNodeRetryAt = now
+	// A retried node that only acks accepted must be able to time out again.
+	s.reopenCommandLocked(command, now)
 	message := command.Message
+	seq, content := s.snapshotStateLocked()
 	s.commandMu.Unlock()
+	s.persistState(seq, content)
 
 	slog.Warn("retrying shutdown for unfinished nodes", "command_id", message.CommandID, "nodes", len(nodeIDs))
 	s.replayShutdownToNodes(message, nodeIDs)

@@ -346,26 +346,28 @@ func TestTagTargetedCommandAdoptsNodeThatReconnectsLater(t *testing.T) {
 	}
 }
 
-func TestRestoredEpisodeIsNotReplayedBeforeFirstUPSReading(t *testing.T) {
-	server, ups := newEpisodeServer(config.MasterConfig{})
-	now := time.Now().UTC()
-	server.commands["shutdown-a"] = &shutdownCommandState{
-		Message:     protocol.ShutdownMessage{CommandID: "shutdown-a", IssuedAt: now, Target: protocol.ShutdownTarget{All: true}},
-		TargetNodes: map[string]struct{}{"node-1": {}},
-		NodeUpdates: map[string]protocol.ShutdownAckMessage{},
-		Auto:        true,
-	}
-	server.activeCommand = "shutdown-a"
-	server.episode = &autoEpisode{StartedAt: now, CommandID: "shutdown-a"}
-	slave := connectFakeSlave(t, "node-1")
+func TestRestoredEpisodeIsNotActedOnBeforeFirstUPSReading(t *testing.T) {
+	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	server, ups := restartedServer(t, config.MasterConfig{
+		LocalShutdown: enabledLocalShutdown(),
+		ShutdownPolicies: []config.ShutdownPolicySpec{
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
+		},
+	}, t0, t0.Add(10*time.Minute))
+	calls := &localShutdownCalls{}
+	server.localShutdownRunner = calls.run
+	slave := newFakeSlave(t, server, "node-1")
 
 	go func() { _ = server.replayPendingShutdown(slave.client) }()
+	server.retryEpisodeShutdown(t0.Add(11 * time.Minute))
+	server.evaluateLocalShutdown(t0.Add(30*time.Minute), nil)
 	slave.expectNothing(t)
+	if got := calls.snapshot(); len(got) != 0 {
+		t.Fatalf("expected the restored local shutdown to wait for a reading, got %+v", got)
+	}
 
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 50, RuntimeMinutes: 20})
-	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
-		t.Fatalf("evaluate: %v", err)
-	}
+	pollAt(t, server, t0.Add(31*time.Minute))
 	go func() { _ = server.replayPendingShutdown(slave.client) }()
 	slave.expectShutdown(t)
 }
