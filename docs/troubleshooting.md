@@ -19,7 +19,7 @@ journalctl -u nut-master -n 50 --no-pager
 sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
 ```
 
-`-check-config` 只校验配置和关机权限,通过输出 `config ok: <路径>`,失败输出 `config check failed: <路径>: <错误>` 并以 1 退出。要用 `nut-server` 用户跑,root 下 sudo 检查总能通过。slave 同理换成 `nut-slave` 和 `slave.yaml`。
+`-check-config` 校验配置、加载 TLS 证书和私钥(dry-run 下也加载)并检查关机权限,通过输出 `config ok: <路径>`,失败输出 `config check failed: <路径>: <错误>` 并以 1 退出。要用 `nut-server` 用户跑,root 下 sudo 检查总能通过。slave 同理换成 `nut-slave` 和 `slave.yaml`。
 
 常见根因:
 - **配置仍是占位值**:`enrollment_tokens` / `admin_token` / slave `token` 留空或还是 `replace-with-strong-token` → master/slave **故意拒绝启动**(fail-closed)。日志会指出具体字段。改成强随机值:`openssl rand -hex 24`。
@@ -51,7 +51,7 @@ curl -s .../metrics | grep nut_slave_connect_attempts_total
   - slave 存的专属 token 被吊销,或 master 的 state 文件丢失:slave 会打 `master rejected the issued token; falling back to the config token`,清掉存的 token,下次重连用配置里的 `token` 重新注册,`enrollment: open` 时自动恢复。
   - 用装机脚本安装的节点被吊销后:它配置里的 `token` 就是被吊销的专属 token,没有可回退的 enrollment token,会一直被拒。在 master 上重新生成装机脚本并在该节点执行。
   - 另外,用装机脚本重新生成 token 会让该节点旧的 token 失效并断开连接,直到新脚本执行完。
-- **slave 日志 `store issued token: ...`**:slave 无法把 master 签发的 token 写进 `state_file`,会断开重试。检查 `state_file` 路径是否可写(随包配置为 `/var/lib/nut-server/slave-state.json`)。
+- **slave 日志 `store issued token: ...`**:slave 无法把 master 签发的 token 写进 `state_file`,会记错误日志、保持连接并继续用配置里的 `token`。检查 `state_file` 路径是否可写(随包配置为 `/var/lib/nut-server/slave-state.json`)。
 - **状态页节点标 `not enrolled`**:节点已连接,但 master 还没记下它的专属 token。正常情况下 slave 回复 `token_stored` 后标记会消失。一直存在时:slave 还是 v0.6.0 之前的版本(不会回复,继续用 enrollment token,升级即可),或看 master 日志 `discard issued token`。
 - **地址/端口不通**:`dial tcp ... connection refused`。检查 `master_addr`、防火墙、master 的 `listen_addr`。
 - **TLS 配置不对称**:一端开 TLS 另一端没开 → 握手失败。见下方 *TLS / mTLS 握手失败*。
@@ -102,9 +102,10 @@ snmpget -v2c -c public <ups-host> .1.3.6.1.2.1.33.1.2.4.0   # 手动验证 OID
 ```
 
 常见根因:
-- **目标/community/版本不对**:`snmp.target` / `snmp.community` / `snmp.version`。SNMPv3 还要核对 `username`、`security_level` 和 auth / priv 的协议与 passphrase 是否与 UPS 网卡一致。
+- **目标/community/版本不对**:`snmp.target` / `snmp.community` / `snmp.version`。v1 / v2c 下 `community` 必填,留空启动失败。SNMPv3 还要核对 `username`、`security_level` 和 auth / priv 的协议与 passphrase 是否与 UPS 网卡一致。
 - **OID 不被该 UPS 支持**:返回 `NoSuchObject` / `NoSuchInstance` 会被当作**错误**(不再被误读成 0,避免误触发关机)。先试 `snmp.profile`(`ups-mib` 默认,另有 `apc` / `cyberpower` / `eaton`,厂商预设未经真机验证);仍不对时用 `snmpwalk` 找你的 UPS 实际支持的 OID,用 `snmp.on_battery: {oid, values}`、`snmp.charge: {oid}`、`snmp.runtime: {oid, unit}` 逐项覆盖。
-- **电池状态或续航读数不对**:`on_battery.values` 要写该 OID 表示「走电池」的取值(UPS-MIB 是 5,APC / CyberPower 是 3);`runtime.unit` 要与 OID 的单位一致(`minutes` / `seconds` / `timeticks`,TimeTicks 为 1/100 秒),读数统一换算成分钟并向下取整。
+- **电量或续航读数为负数**:轮询失败,错误里给出 OID 和读数,不会当作 0 处理。核对 OID。
+- **电池状态或续航读数不对**:`on_battery.values` 要写该 OID 表示「走电池」的取值(UPS-MIB 是 5,APC / CyberPower 是 3);覆盖 `snmp.runtime` 时必须写 `runtime.unit`,且要与 OID 的单位一致(`minutes` / `seconds` / `timeticks`,TimeTicks 为 1/100 秒),读数统一换算成分钟并向下取整。OID 返回 TimeTicks 而 `unit` 不是 `timeticks` 时轮询失败,报 `set snmp.runtime.unit: timeticks`。
 - **数据陈旧**:`nut_master_ups_last_success_timestamp_seconds` 长时间不更新 → 轮询卡住或目标不可达。建议对 `time() - ups_last_success_timestamp_seconds > 3 * poll_interval` 告警。
 
 ---
@@ -118,7 +119,7 @@ curl -s .../metrics | grep -E 'shutdowns_issued|shutdown_acks'
 
 常见根因:
 - **策略阈值没命中**:核对 `shutdown_policies` 的 `charge_below` / `runtime_below` 与 `/status` 里的 UPS 实际读数。策略只在 UPS 走电池时评估,市电下不会触发。
-- **该策略本次断电已触发过**:`/status` 的 `episode.fired_policies` 列出本次断电已触发的策略,每条策略在一次断电内只触发一次。市电恢复后 episode 结束;`POST /commands/reset` 也会结束当前 episode。
+- **该策略本次断电已触发过**:`/status` 的 `episode.fired_policies` 列出本次断电已触发的策略,每条策略在一次断电内只触发一次。只有市电恢复才结束 episode;`POST /commands/reset` 不结束 episode,已触发过的策略在本次断电内不会再触发,还没触发的策略仍会触发。
 - **防抖未到时**:策略配了 `duration` 时,条件要连续满足这么久才触发。轮询失败不清零也不触发,触发需要一次新的命中读数。master 重启或新的一次断电都会重新计时。
 - **dry_run 开着**:`dry_run: true` 时只模拟不真正关机,节点回报 `simulated`。`/status` 的节点带 `dry_run: true` 的是 slave 本地开着 dry-run。
 - **关机权限不通**:节点 `shutdown_ready: false`,或日志有 `shutdown command self-check failed`。按日志里的错误检查 sudoers 与 systemd unit(见下文 local_shutdown 一节)。
@@ -149,7 +150,7 @@ curl -s .../status | jq '.local_shutdown'   # phase / trigger / last_error
 
 - `waiting_remote`:仍在等远端 `executed`/`failed`。
 - `wait_expired`:超过 `max_wait` 兜底,准备关 master。
-- `emergency`:提前关本机。`trigger` 为 `emergency_runtime` 表示 UPS 续航低于 `emergency_runtime_minutes`;为 `ups_unreachable` 表示断电期间 UPS 连续 `local_shutdown.unreachable_after`(默认等于 `max_wait`)没有应答。后者先查 SNMP 连通性(见上文)。市电下 UPS 失联不会触发。
+- `emergency`:提前关本机。`trigger` 为 `emergency_runtime` 表示 UPS 续航低于 `emergency_runtime_minutes`;为 `ups_unreachable` 表示断电期间 UPS 连续 `local_shutdown.unreachable_after`(默认等于 `max_wait`)没有应答。后者先查 SNMP 连通性(见上文)。市电下 UPS 失联不会触发；master 在断电中自己关机后再开机时，读到 UPS 之前也不会触发。
 - `failed` + `last_error`:多半是 sudo 没放行。master 每 30s 重试一次。确认随包的 `/etc/sudoers.d/nut-server-master` 存在且 `visudo -c` 通过,命令为 `sudo -n /sbin/shutdown -h now`,并且 unit 是 v0.5.2+ 的版本(旧 unit 会隐式开启 NoNewPrivileges,sudo 无法提权)。`/status` 的 `local_shutdown.command_ready` 是启动时的自检结果。
 - 一直 `idle`:只有目标为全部节点的命令才会进入等待流程;只针对部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes` 或 UPS 失联超过 `unreachable_after` 时无论如何都会关 master。
 

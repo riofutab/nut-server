@@ -117,7 +117,7 @@ master 的 `tls` 开启时,`POST /nodes/<node_id>/install-script` 生成的脚�
 - 用脚本里 `master_addr` 的主机名(配了 `public_addr` 时即其主机名)作为 `--tls-server-name`,所以 master 证书的 SAN 要包含这个名字;`public_addr` 写 IP 时证书要有对应的 IP SAN;
 - 不带 `--disable-tls`。
 
-建议把 `install_ca_file` 设为签发 master 证书的 CA(例如上文的 `/etc/nut-server/tls/ca.crt`):master 换证书时只要还是这个 CA 签发,slave 不用改。没配时 slave 信任的是 master 证书本身,master 换证书后,已安装的 slave 要更新 `/etc/nut-server/ca.crt`(或重新执行装机脚本),否则握手会失败。`install_ca_file` 只能在 master 开启 TLS 时使用,启动时会检查文件里至少有一张 PEM 证书。脚本不处理 mTLS 客户端证书;master 设了 `require_client_cert: true` 时,还要按上文给 slave 装客户端证书并配置 `tls.cert_file` / `tls.key_file`。
+建议把 `install_ca_file` 设为签发 master 证书的 CA(例如上文的 `/etc/nut-server/tls/ca.crt`):master 换证书时只要还是这个 CA 签发,slave 不用改。没配时 slave 信任的是 master 证书本身,master 换证书后,已安装的 slave 要更新 `/etc/nut-server/ca.crt`(或重新执行装机脚本),否则握手会失败。`install_ca_file` 只能在 master 开启 TLS 时使用,启动时会检查文件里至少有一张 PEM 证书,并且只能包含 `CERTIFICATE` 块,含私钥或其它类型的块会被拒绝;脚本只内嵌证书。脚本不处理 mTLS 客户端证书;master 设了 `require_client_cert: true` 时,还要按上文给 slave 装客户端证书并配置 `tls.cert_file` / `tls.key_file`。
 
 手动执行 `install-slave.sh` / `quick-install-slave.sh` 时,`--tls-ca-file` 指定的文件同样会被复制到 `/etc/nut-server/ca.crt`。
 

@@ -20,7 +20,18 @@
 ### Changed
 - **装机接口**改为 `POST /nodes/{node_id}/install-script`:为节点签发专属 token;token 与 CA 经 heredoc 写入临时文件传递,不出现在命令行;master 开 TLS 时内嵌 CA 与 server name;脚本固定到 release tag,开发版返回 503。
 - `install-slave.sh` / `quick-install-slave.sh` 的 `--token` 改为 `--token-file`。
-- token 比较先做 SHA-256 再逐个恒定时间比较,不再泄露长度。
+- 配置校验收紧:`snmp.runtime` 覆盖时必须写 `unit`;`snmp.timeout_seconds` 取 1..60(不写或 0 为 2);v1/v2c 的 `community` 必填;显式写 `charge_below: 0` / `runtime_below: 0` / `ups_unreachable_for: 0s` 被拒,`charge_below` 取 1..100;`poll_interval` / `command_timeout` / `offline_after` 为负数被拒;slave `shutdown_command` 显式写空列表被拒。
+- SNMP 电量或续航读数为负数、或 runtime OID 返回 TimeTicks 而 `unit` 不是 `timeticks` 时,本次轮询失败。
+- `-check-config` 同时加载 TLS 证书和私钥(master `tls`、`admin_tls`,slave `tls`),dry-run 下也加载。
+- `install-slave.sh` 重跑时重新生成 `slave.yaml`(旧文件备份为 `slave.yaml.bak-<UTC 时间>`,只保留 `dry_run`);新二进制和配置先通过 `-check-config` 才替换;拒绝符号链接配置;服务在运行时重启。
+- 装机接口对格式不对的 `master_addr` 返回 400,解析到回环地址时返回 503;支持 `[IPv6]:port`。
+- `POST /commands/reset` 不再结束当前断电 episode:它停止重放当前命令和本次断电的命令,取消尚未开始执行的本机关机;已触发的策略在市电恢复前不会再触发,未触发的策略仍会触发,`local_shutdown` 的紧急条件仍会关 master。
+- `install-master.sh` / `quick-install-master.sh` 的 `--token` 改为 `--token-file`,删除 `--admin-token`(`admin_token` 由脚本生成),token 不再出现在命令行和 sudo 日志里。
+- `install-master.sh` 先用新二进制在临时位置跑 `-check-config`,通过后才替换已安装的二进制;服务在运行时重启到新版本。结束时给出的 slave 安装步骤改为在 master 上生成脚本、拷到 slave 执行。
+- `upgrade-master.sh` / `upgrade-slave.sh` 在 `.deb` / `.rpm` 安装的机器上拒绝执行,避免 `/etc/systemd/system` 下的 unit 覆盖包里的 unit。
+- CI 对所有 shell 脚本跑 `dash -n`、`bash -n` 和 `shellcheck -S warning`;packaging-smoke 增加从 v0.6.0 之前的 `.deb` 升级时打印手动启动命令的检查。
+- token 比较先做 SHA-256 再逐个恒定时间比较,不再泄露长度;`admin_token` 同样处理。
+- master `local_shutdown.command` 与 slave `shutdown_command` 的默认值改为 `["/usr/bin/sudo", "-n", "/sbin/shutdown", "-h", "now"]`,与随包 sudoers 一致;原默认值不经 sudo,以 `nut-server` 用户运行时必然失败。
 - slave state 文件改为结构化格式(含签发的 token),旧文件的已处理命令记录丢弃一次。
 - 指标 `nut_master_register_attempts_total` 新增 `result="enrolled"`。
 - 取消预期节点改为 `DELETE /nodes/{node_id}/expected`(原 `DELETE /nodes/expect/{node_id}`),避免与 `DELETE /nodes/{node_id}/token` 路径冲突。
@@ -28,7 +39,24 @@
 - 签发的 token 只在 slave 回复 `token_stored` 后生效,旧版 slave 不受影响,继续用 enrollment token 注册。
 
 ### Fixed
+- 手动 dry-run 全部节点的演练完成后,残留的本机关机状态会挡住之后真实断电时的 master 关机;现在新的全部节点命令和紧急条件都会替换其他命令留下、尚未执行的本机关机状态,手动命令的 `dry_run` 不再带到紧急关机上。
+- `POST /commands/reset` 清除任何尚未执行的本机关机,失败后反复重试的也一并清除。
+- 断电期间 master 重启后、首次读到 UPS 之前重连的 slave,在读到 UPS 后由重试流程纳入本次命令并下发关机。
+- 重启前已触发的 `ups_unreachable_for` 策略在 UPS 持续失联时继续确认恢复的 episode,不再一直等 UPS 读数。
+- 市电恢复时取消本次断电内由紧急条件建立的本机关机(包括失败重试中的),即使之后 episode 已有命令。
+- `emergency_runtime_minutes` 只在电池供电的读数上生效。
+- master 在断电中真实关闭自身后再开机时,读到 UPS 之前不启用 UPS 失联兜底(策略与本机关机),避免 UPS 网卡启动慢时在市电下再次关机或向 slave 重放关机。
+- 重试后又停在 `accepted` 的节点会再次超时并继续重试。
+- 注册通过鉴权后、加入在线列表前若该节点 token 被轮换或吊销,连接被拒绝,不再以旧 token 留在线上。
 - `.deb` / `.rpm` 升级时不再停止并 disable 服务;postinst 在配置通过 `-check-config` 后重启正在运行的服务,不通过则保留旧进程并告警。
+- 从 v0.5.x 的 `.rpm` 升级后,旧包 `%preun` 停掉并 disable 的服务会被恢复:`%pre` 记录 enable / 运行状态,`%posttrans` 在 `-check-config` 通过后恢复。从 v0.5.x 的 `.deb` 升级时服务保持停止,postinst 打印要手动执行的 `-check-config` 与 `systemctl enable --now` 命令。只在真正重启后才打印 "restarted"。
+- master / slave 的 state 文件无法解析时改名为 `<state_file>.corrupt-<UTC 时间>`、记错误日志并以空状态启动;master 会丢失节点 token 绑定。
+- slave 无法写入签发的 token 时保持连接并继续用配置 token,只记错误日志。
+- 关机自检只接受 sudo 的 `-n` / `-u` / `-g` / `--`;非 root 时不经 sudo 直接调用 `shutdown` / `poweroff` / `halt` / `reboot` / `systemctl` 判为未就绪。
+- `install_ca_file` 只能包含 `CERTIFICATE` PEM 块,装机脚本只内嵌证书。
+- `install-master.sh` 拒绝符号链接形式的 `master.yaml`,不再以 root 改写、chown、chmod 链接目标。
+- `install-online.sh` 的错误信息改输出到 stderr;`/releases/latest` 请求失败(例如只有预发布版)时提示传 `--version`。
+- 文档:quick start 固定 `--version v0.6.0-rc.1`(正式版前 `latest` 指向 v0.5.1);装机脚本只在 master 上用 `admin_token` 生成;`local_shutdown` 示例的 `emergency_runtime_minutes` 改为低于策略阈值并写明 sudo 关机命令;去掉已移除的 `RestrictAddressFamilies`;Go 徽章改为 1.26。
 
 ### Removed
 - `auth_tokens`(改名 `enrollment_tokens`)、旧格式 `shutdown_policy`、`when.on_battery`、`snmp.output_source_oid` / `charge_oid` / `runtime_minutes_oid`、`GET /install/slave`。配置改为严格解析,未知字段启动报错。

@@ -25,6 +25,8 @@ sudo ./scripts/upgrade-slave.sh
 
 如果服务原本在跑，升级脚本会在替换文件后 `systemctl restart` 重启，不需要额外操作。
 
+用 `.deb` / `.rpm` 安装的机器不要用这个升级包：脚本检测到 `/usr/local/bin/nut-master`（或 `nut-slave`）属于软件包时会拒绝执行，请用 apt / dnf / yum 安装新版本的包。否则它写到 `/etc/systemd/system` 的 unit 会一直覆盖包里 `/lib/systemd/system` 下的 unit。
+
 ## v0.5.1 → v0.6.0 升级注意
 
 v0.6.0 集中做了所有破坏性配置变更。master 的配置必须改写，slave 的配置不用改。
@@ -62,8 +64,10 @@ sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-serv
 ### 升级方式的差别
 
 - **tar.gz 升级脚本**：先装 sudoers，再把新二进制放到临时位置，以 `nut-server` 用户（`runuser`，Debian/RHEL 系自带）跑 `-check-config`。不通过就删掉临时文件、保留旧二进制、不重启，并以退出码 1 结束。所以要先改好配置再跑升级脚本。
-- **`.deb` / `.rpm`**：v0.6.0 起，升级包时服务保持 enable；如果服务在运行，postinst 以 `nut-server` 用户跑 `-check-config`，通过就重启到新版本，不通过就不重启并打印警告，旧进程继续运行（但重启机器后会起不来）。所以同样要先改好配置再装包。
-  - 例外：从 v0.5.x 的包升级时，执行的是旧包里的 prerm，它仍会停止并 disable 服务。这一次装完新包、改好配置、`-check-config` 通过后，需要手动执行 `sudo systemctl enable --now nut-master`（slave 同理）。
+- **`.deb` / `.rpm`**：v0.6.0 起，升级包时服务保持 enable；如果服务在运行，新包以 `nut-server` 用户跑 `-check-config`，通过就重启到新版本，不通过就不重启并打印警告，旧进程继续运行（但重启机器后会起不来）。所以同样要先改好配置再装包。
+  - 从 v0.5.x 的包升级时，旧包的 prerm 仍会停止并 disable 服务。
+    - rpm：新包在 `%pre` 里记录服务是否 enable、是否在运行，在 `%posttrans`（旧包脚本都跑完之后）恢复：原来 enable 的重新 enable，原来在运行的在 `-check-config` 通过后启动。校验不通过时服务保持停止并打印警告。
+    - deb：旧 prerm 在新包任何脚本之前执行，新包无法得知原状态，服务保持停止、不 enable。postinst 会打印提示和要手动执行的命令：以 `nut-server` 用户跑 `-check-config`，通过后执行 `sudo systemctl enable --now nut-master`（slave 同理）。
 
 ### per-node token 带来的行为变化
 
