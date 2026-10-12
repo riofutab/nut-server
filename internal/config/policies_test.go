@@ -13,6 +13,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 `
 
 const defaultPolicy = `
@@ -192,7 +193,7 @@ shutdown_policies:
 }
 
 func TestLoadMasterConfigAcceptsChargeBelowBounds(t *testing.T) {
-	for _, charge := range []string{"0", "100"} {
+	for _, charge := range []string{"1", "100"} {
 		t.Run(charge, func(t *testing.T) {
 			path := writeConfigFile(t, minimalMasterFields+`
 shutdown_policies:
@@ -204,5 +205,52 @@ shutdown_policies:
 				t.Fatalf("expected charge_below %s to be valid, got %v", charge, err)
 			}
 		})
+	}
+}
+
+func TestLoadMasterConfigRejectsExplicitZeroPolicyConditions(t *testing.T) {
+	cases := []struct {
+		name    string
+		when    string
+		wantErr string
+	}{
+		{name: "charge_below", when: "charge_below: 0", wantErr: "shutdown_policies[1] (p).when.charge_below must be greater than 0"},
+		{name: "runtime_below", when: "runtime_below: 0", wantErr: "shutdown_policies[1] (p).when.runtime_below must be greater than 0"},
+		{name: "ups_unreachable_for", when: "ups_unreachable_for: 0s", wantErr: "shutdown_policies[1] (p).when.ups_unreachable_for must be greater than 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policies:
+  - name: first
+    when: { charge_below: 20 }
+  - name: p
+    when: { `+tc.when+` }
+`)
+
+			_, err := LoadMasterConfig(path)
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestLoadMasterConfigAcceptsExplicitZeroDuration(t *testing.T) {
+	path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policies:
+  - name: p
+    when: { charge_below: 20 }
+    duration: 0s
+`)
+
+	cfg, err := LoadMasterConfig(path)
+
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ShutdownPolicies[0].Duration.Duration != 0 {
+		t.Fatalf("duration=%v want 0", cfg.ShutdownPolicies[0].Duration.Duration)
 	}
 }

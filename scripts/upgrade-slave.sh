@@ -5,6 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/upgrade-common.sh"
 
 require_root
+refuse_package_managed nut-slave
 secure_install_layout /etc/nut-server/slave.yaml
 install_sudoers_from_package nut-server-slave
 install_binary_from_package nut-slave /etc/nut-server/slave.yaml

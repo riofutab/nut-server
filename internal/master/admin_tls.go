@@ -2,28 +2,9 @@ package master
 
 import (
 	"crypto/tls"
-	"fmt"
 	"log/slog"
 	"net"
-
-	"nut-server/internal/config"
 )
-
-// loadAdminTLSConfig returns nil when admin_tls is not configured. The
-// certificate is read once at startup; replacing it needs a restart.
-func loadAdminTLSConfig(cfg config.AdminTLSConfig) (*tls.Config, error) {
-	if cfg.CertFile == "" && cfg.KeyFile == "" {
-		return nil, nil
-	}
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load admin_tls certificate: %w", err)
-	}
-	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
-	}, nil
-}
 
 // warnPlaintextAdmin flags an admin API that sends the bearer token in clear
 // text over a network interface.

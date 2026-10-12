@@ -212,28 +212,40 @@ func TestSlaveKeepsIssuedTokenOnOtherRejections(t *testing.T) {
 	}
 }
 
-func TestSlaveClosesConnectionWhenIssuedTokenCannotBePersisted(t *testing.T) {
+func TestSlaveStaysRegisteredWithoutConfirmingWhenIssuedTokenCannotBePersisted(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatalf("create blocker: %v", err)
 	}
 	client, accept := startFakeMaster(t, config.SlaveConfig{StateFile: filepath.Join(blocker, "slave-state.json")})
-	_, done := runOnceAsync(t, client)
+	cancel, done := runOnceAsync(t, client)
 	master := accept()
 	master.readRegister(t)
 
 	master.ack(t, protocol.RegisterAckMessage{Accepted: true, IssuedToken: "issued-1"})
-	env, err := master.read(t)
+	_ = master.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	env, err := protocol.ReadEnvelope(master.reader)
 
 	if err == nil {
-		t.Fatalf("slave must close the connection without confirming, got %s", env.Type)
+		t.Fatalf("slave must not confirm an unpersisted token, got %s", env.Type)
 	}
-	if runErr := waitRunOnce(t, done); runErr == nil {
-		t.Fatal("runOnce should report the persistence failure")
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("slave must keep the session open, got read error %v", err)
+	}
+	select {
+	case runErr := <-done:
+		t.Fatalf("runOnce returned while the session should stay open: %v", runErr)
+	default:
 	}
 	client.commandMu.Lock()
-	defer client.commandMu.Unlock()
-	if client.issuedToken != "" {
+	issued := client.issuedToken
+	client.commandMu.Unlock()
+	if issued != "" {
 		t.Fatal("an unpersisted issued token must not be kept in memory")
 	}
+	if token, usedIssued := client.registerToken(); usedIssued || token != configToken {
+		t.Fatalf("next register token=%q issued=%v, want the config token", token, usedIssued)
+	}
+	cancel()
+	waitRunOnce(t, done)
 }

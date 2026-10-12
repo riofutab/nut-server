@@ -68,6 +68,19 @@ func decodeUPSPacket(cfg config.SNMPConfig, packet *gosnmp.SnmpPacket) (UPSStatu
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read runtime oid: %w", err)
 	}
+	// A negative reading would round to 0 minutes and trigger every runtime
+	// threshold, so it fails the poll like any other unusable value.
+	if charge < 0 {
+		return UPSStatus{}, fmt.Errorf("read charge oid: oid %s returned negative value %d", cfg.Charge.OID, charge)
+	}
+	if runtime < 0 {
+		return UPSStatus{}, fmt.Errorf("read runtime oid: oid %s returned negative value %d", cfg.Runtime.OID, runtime)
+	}
+	// Reading TimeTicks as minutes or seconds inflates runtime 6000x or 100x.
+	// The reverse is fine: some agents report tick counts as plain Integer.
+	if packet.Variables[2].Type == gosnmp.TimeTicks && cfg.Runtime.Unit != config.RuntimeUnitTimeTicks {
+		return UPSStatus{}, fmt.Errorf("read runtime oid: oid %s returns TimeTicks; set snmp.runtime.unit: timeticks", cfg.Runtime.OID)
+	}
 
 	return UPSStatus{
 		OnBattery:      slices.Contains(cfg.OnBattery.Values, batteryState),

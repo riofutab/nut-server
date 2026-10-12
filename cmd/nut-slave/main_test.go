@@ -34,7 +34,7 @@ func TestCheckConfigSkipsSelfCheckInDryRun(t *testing.T) {
 }
 
 func TestCheckConfigPassesWithExecutableShutdownCommand(t *testing.T) {
-	command := filepath.Join(t.TempDir(), "poweroff")
+	command := filepath.Join(t.TempDir(), "ups-poweroff.sh")
 	if err := os.WriteFile(command, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write command: %v", err)
 	}
@@ -52,6 +52,20 @@ func TestCheckConfigRejectsInvalidConfig(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "tokn") {
 		t.Fatalf("expected config error, got %v", err)
+	}
+}
+
+func TestCheckConfigLoadsClientTLSMaterial(t *testing.T) {
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, []byte("not pem"), 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	path := writeConfig(t, slaveConfigBase+"dry_run: true\ntls:\n  ca_file: \""+caFile+"\"\n")
+
+	err := checkConfig(path)
+
+	if err == nil || !strings.Contains(err.Error(), caFile) {
+		t.Fatalf("expected tls ca error naming %s, got %v", caFile, err)
 	}
 }
 

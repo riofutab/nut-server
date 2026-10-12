@@ -12,6 +12,7 @@ admin_token: "admin-secret"
 enrollment_tokens: ["secret-token"]
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 `
@@ -62,6 +63,35 @@ local_shutdown:
 
 	if err := checkConfig(path); err != nil {
 		t.Fatalf("expected dry-run to skip the self-check, got %v", err)
+	}
+}
+
+func TestCheckConfigLoadsTLSMaterial(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "bad.crt")
+	keyFile := filepath.Join(dir, "bad.key")
+	for _, file := range []string{certFile, keyFile} {
+		if err := os.WriteFile(file, []byte("not pem"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
+	}
+	cases := map[string]struct {
+		section string
+		wantErr string
+	}{
+		"slave listener tls": {section: "tls", wantErr: "tls key pair"},
+		"admin tls":          {section: "admin_tls", wantErr: "admin_tls"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfig(t, masterConfigBase+tc.section+":\n  cert_file: \""+certFile+"\"\n  key_file: \""+keyFile+"\"\n")
+
+			err := checkConfig(path)
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 

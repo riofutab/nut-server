@@ -11,6 +11,18 @@ require_root() {
   fi
 }
 
+# A .deb/.rpm install keeps its unit in /lib/systemd/system; the copy this
+# script writes to /etc/systemd/system would shadow every later packaged unit.
+refuse_package_managed() {
+  name="$1"
+  path="/usr/local/bin/$name"
+  if { command -v dpkg >/dev/null 2>&1 && dpkg -S "$path" >/dev/null 2>&1; } ||
+    { command -v rpm >/dev/null 2>&1 && rpm -qf "$path" >/dev/null 2>&1; }; then
+    echo "$path was installed by the $name package; upgrade it with apt, dnf or yum instead of this script" >&2
+    exit 1
+  fi
+}
+
 find_existing_file() {
   for candidate in "$@"
   do

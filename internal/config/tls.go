@@ -64,6 +64,22 @@ func (c TLSConfig) ClientTLSConfig() (*tls.Config, error) {
 	return cfg, nil
 }
 
+// TLSConfig returns nil when admin_tls is not configured. The certificate is
+// read once; replacing it needs a restart.
+func (c AdminTLSConfig) TLSConfig() (*tls.Config, error) {
+	if c.CertFile == "" && c.KeyFile == "" {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load admin_tls certificate: %w", err)
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}, nil
+}
+
 func loadCertPool(path string) (*x509.CertPool, error) {
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {

@@ -2,7 +2,6 @@ package master
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -15,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"nut-server/internal/protocol"
+	"nut-server/internal/security"
 )
 
 const (
@@ -103,9 +103,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
-	expected := []byte(s.cfg.AdminToken)
+	configured := s.cfg.AdminToken != ""
+	expectedHash := []string{security.HashToken(s.cfg.AdminToken)}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if len(expected) == 0 {
+		if !configured {
 			writeJSONError(w, http.StatusServiceUnavailable, "admin token not configured")
 			return
 		}
@@ -115,8 +116,7 @@ func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
 			writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		candidate := []byte(strings.TrimPrefix(header, prefix))
-		if subtle.ConstantTimeCompare(candidate, expected) != 1 {
+		if !security.MatchToken(expectedHash, strings.TrimPrefix(header, prefix)) {
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}

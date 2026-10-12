@@ -20,15 +20,26 @@ const checkTimeout = 10 * time.Second
 // Runner executes name with args and returns nil only on exit status 0.
 type Runner func(ctx context.Context, name string, args ...string) error
 
-// sudoValueOptions are sudo short options that consume the next argument.
-var sudoValueOptions = map[string]bool{
-	"-u": true, "-g": true, "-U": true, "-C": true, "-D": true,
-	"-h": true, "-p": true, "-r": true, "-t": true, "-T": true,
+// sudoRunAsOptions select the run-as user or group, which changes which
+// sudoers rule matches, so they are passed on to the `sudo -l` query. Other
+// sudo options (-D, -R, -C, -T, ...) are rejected rather than modelled: each
+// has its own argument rules and sudoers checks, and guessing them wrong gives
+// a false pass or fail.
+var sudoRunAsOptions = map[string]string{
+	"-u": "-u", "--user": "-u",
+	"-g": "-g", "--group": "-g",
 }
 
-// sudoKeptOptions change which sudoers rule matches, so they must be part of
-// the `sudo -l` query; the other options do not affect authorization.
-var sudoKeptOptions = map[string]bool{"-u": true, "-g": true}
+// rootOnlyCommands are executable basenames that cannot power the host off
+// without root (polkit refuses a service user), so a non-sudo command naming
+// one would only fail when the power is actually going. Other custom commands
+// (scripts, ipmitool, ...) may work without root and are left alone.
+var rootOnlyCommands = map[string]bool{
+	"shutdown": true, "poweroff": true, "halt": true, "reboot": true, "systemctl": true,
+}
+
+// geteuid is replaced in tests.
+var geteuid = os.Geteuid
 
 // Check verifies argv can be executed as the shutdown command without running it.
 // run == nil uses os/exec. Bounded by an internal timeout constant (10s).
@@ -37,6 +48,9 @@ func Check(ctx context.Context, argv []string, run Runner) error {
 		return errors.New("shutdown command is empty")
 	}
 	if filepath.Base(argv[0]) != "sudo" {
+		if rootOnlyCommands[filepath.Base(argv[0])] && geteuid() != 0 {
+			return fmt.Errorf("shutdown command %q needs root but this process is not root; prefix it with /usr/bin/sudo -n (e.g. /usr/bin/sudo -n /sbin/shutdown -h now, allowed by the shipped sudoers entry in /etc/sudoers.d/nut-server-*)", strings.Join(argv, " "))
+		}
 		return checkExecutable(argv[0])
 	}
 	if run == nil {
@@ -47,8 +61,18 @@ func Check(ctx context.Context, argv []string, run Runner) error {
 	return checkSudo(ctx, argv, run)
 }
 
+// checkSudo asks `sudo -n -l <cmd>` whether cmd may run without a password.
+// Limitation: with the default listpw=any, sudo -l itself needs no password
+// when any rule for the user has NOPASSWD, so this passes for a command that
+// is allowed but still needs a password if another rule is NOPASSWD. The
+// shipped sudoers files grant only NOPASSWD shutdown rules, so this does not
+// arise with them; parsing `sudo -l` output to match tags per command is not
+// reliable across aliases, wildcards and sudo versions.
 func checkSudo(ctx context.Context, argv []string, run Runner) error {
-	kept, target := splitSudoArgs(argv[1:])
+	kept, target, err := splitSudoArgs(argv[1:])
+	if err != nil {
+		return err
+	}
 	if len(target) == 0 {
 		return fmt.Errorf("sudo shutdown command %q has no target command", strings.Join(argv, " "))
 	}
@@ -60,31 +84,49 @@ func checkSudo(ctx context.Context, argv []string, run Runner) error {
 	return nil
 }
 
-// splitSudoArgs separates sudo options (returning only those relevant to the
-// authorization check, with their values) from the target command.
-func splitSudoArgs(args []string) (kept, target []string) {
+// splitSudoArgs separates the supported sudo options (-n and the run-as
+// options, normalized to -u/-g with their values) from the target command.
+func splitSudoArgs(args []string) (kept, target []string, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--" {
-			return kept, args[i+1:]
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return kept, args[i:]
-		}
-		if sudoValueOptions[arg] {
-			if i+1 < len(args) && sudoKeptOptions[arg] {
-				kept = append(kept, arg, args[i+1])
+		switch {
+		case arg == "--":
+			return kept, args[i+1:], nil
+		case !strings.HasPrefix(arg, "-"):
+			return kept, args[i:], nil
+		case arg == "-n":
+			// The check always runs non-interactively.
+		case sudoRunAsOptions[arg] != "":
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("sudo option %s needs a value", arg)
 			}
+			kept = append(kept, sudoRunAsOptions[arg], args[i+1])
 			i++
-			continue
-		}
-		// Attached form such as -uroot; dropping it would silently check the
-		// wrong run-as user.
-		if prefix := arg[:min(len(arg), 2)]; len(arg) > 2 && sudoKeptOptions[prefix] {
-			kept = append(kept, prefix, arg[2:])
+		default:
+			option, value, ok := splitAttachedValue(arg)
+			if !ok {
+				return nil, nil, fmt.Errorf("sudo option %s is not supported by the shutdown self-check; it supports only -n, -u/--user and -g/--group", arg)
+			}
+			kept = append(kept, option, value)
 		}
 	}
-	return kept, nil
+	return kept, nil, nil
+}
+
+// splitAttachedValue parses -uroot, --user=root and their group forms.
+func splitAttachedValue(arg string) (option, value string, ok bool) {
+	if name, value, found := strings.Cut(arg, "="); found && strings.HasPrefix(arg, "--") {
+		if option := sudoRunAsOptions[name]; option != "" && value != "" {
+			return option, value, true
+		}
+		return "", "", false
+	}
+	if len(arg) > 2 && !strings.HasPrefix(arg, "--") {
+		if option := sudoRunAsOptions[arg[:2]]; option != "" {
+			return option, arg[2:], true
+		}
+	}
+	return "", "", false
 }
 
 func checkExecutable(path string) error {

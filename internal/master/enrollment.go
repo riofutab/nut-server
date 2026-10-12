@@ -37,24 +37,41 @@ func hashTokens(tokens []string) []string {
 // authenticateNode checks a register token. A node with an issued token must
 // present it. Otherwise, while enrollment is open, an enrollment token admits
 // the node and a new token is returned; it only becomes the node's token once
-// confirmIssuedToken runs.
-func (s *Server) authenticateNode(nodeID, token string) (string, error) {
+// confirmIssuedToken runs. tokenHash is the node token hash the decision was
+// based on ("" for an enrollment), for registerIfTokenUnchanged.
+func (s *Server) authenticateNode(nodeID, token string) (issuedToken, tokenHash string, err error) {
 	s.tokensMu.Lock()
 	hash, enrolled := s.nodeTokens[nodeID]
 	s.tokensMu.Unlock()
 	if enrolled {
 		if !security.MatchToken([]string{hash}, token) {
-			return "", errInvalidToken
+			return "", "", errInvalidToken
 		}
-		return "", nil
+		return "", hash, nil
 	}
 	if s.cfg.Enrollment == config.EnrollmentClosed {
-		return "", errEnrollmentClosed
+		return "", "", errEnrollmentClosed
 	}
 	if !security.MatchToken(s.enrollmentHashes, token) {
-		return "", errInvalidToken
+		return "", "", errInvalidToken
 	}
-	return newNodeToken(), nil
+	return newNodeToken(), "", nil
+}
+
+// registerIfTokenUnchanged adds client to the registry only if the node's
+// token hash still equals tokenHash from authenticateNode. Otherwise a revoke
+// or rotation in between would leave a connection authenticated with a stale
+// token, or a pending enroller would replace a node enrolled meanwhile.
+// Rotation and revoke change the hash before disconnecting, so holding
+// tokensMu across Set leaves no window.
+func (s *Server) registerIfTokenUnchanged(client *Client, tokenHash string) bool {
+	s.tokensMu.Lock()
+	defer s.tokensMu.Unlock()
+	if s.nodeTokens[client.NodeID] != tokenHash {
+		return false
+	}
+	s.registry.Set(client)
+	return true
 }
 
 // confirmIssuedToken stores the hash of a token issued at enrollment. It fails

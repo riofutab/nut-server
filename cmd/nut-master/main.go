@@ -49,11 +49,18 @@ func main() {
 	}
 }
 
-// checkConfig loads the config and runs the same shutdown command self-check
-// as startup, so install scripts can refuse to (re)start a broken service.
+// checkConfig loads the config, the TLS material and runs the same shutdown
+// command self-check as startup, so install scripts can refuse to (re)start a
+// broken service.
 func checkConfig(path string) error {
 	cfg, err := config.LoadMasterConfig(path)
 	if err != nil {
+		return err
+	}
+	if _, err := cfg.TLS.ServerTLSConfig(); err != nil {
+		return err
+	}
+	if _, err := cfg.AdminTLS.TLSConfig(); err != nil {
 		return err
 	}
 	if !cfg.LocalShutdown.Enabled || cfg.DryRun {

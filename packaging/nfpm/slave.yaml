@@ -53,5 +53,10 @@ contents:
       mode: 0750
 
 scripts:
+  preinstall: packaging/nfpm/slave.preinst.sh
   postinstall: packaging/nfpm/slave.postinst.sh
   preremove: packaging/nfpm/slave.prerm.sh
+
+rpm:
+  scripts:
+    posttrans: packaging/nfpm/slave.posttrans.sh

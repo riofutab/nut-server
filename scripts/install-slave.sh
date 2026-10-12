@@ -20,8 +20,12 @@ usage() {
   cat <<'EOF'
 usage: install-slave.sh --node-id <node-id> --master-addr <host:port> --token-file <path> [--tags <comma-separated-tags>] [--disable-tls] [--tls-ca-file <path>] [--tls-server-name <name>] [--tls-cert-file <path> --tls-key-file <path>] [--tls-insecure-skip-verify]
 
-  --token-file <path>                file holding the token (kept off the command line); if
-                                     slave.yaml already exists its token is replaced
+  --token-file <path>                file holding the token (kept off the command line)
+
+/etc/nut-server/slave.yaml is always generated from these options. An existing
+slave.yaml is first backed up to slave.yaml.bak-<UTC timestamp>; only its
+dry_run value is carried over, so merge any other custom settings (tags,
+shutdown_command, metrics_listen_addr, ...) back by hand.
 
 TLS:
   --disable-tls                      force plain TCP and ignore all TLS certificate settings
@@ -125,14 +129,46 @@ reject_unsafe() {
   esac
 }
 
+# master_addr is host:port or [ipv6]:port. Brackets are only accepted around
+# an IPv6 literal, so the value stays safe inside the double-quoted YAML.
+check_master_addr() {
+  case "$MASTER_ADDR" in
+    \[*\]:*)
+      host=${MASTER_ADDR#\[}
+      host=${host%%\]*}
+      port=${MASTER_ADDR##*\]:}
+      if [ "[$host]:$port" != "$MASTER_ADDR" ]; then
+        echo "--master-addr must be host:port or [ipv6]:port" >&2
+        exit 1
+      fi
+      reject_unsafe "--master-addr IPv6 host" "$host" 'a-fA-F0-9:.'
+      ;;
+    *:*)
+      host=${MASTER_ADDR%:*}
+      port=${MASTER_ADDR##*:}
+      reject_unsafe "--master-addr host" "$host" 'a-zA-Z0-9_.\-'
+      ;;
+    *)
+      host=""
+      port=""
+      ;;
+  esac
+  if [ -z "$host" ] || [ -z "$port" ]; then
+    echo "--master-addr must be host:port or [ipv6]:port" >&2
+    exit 1
+  fi
+  reject_unsafe "--master-addr port" "$port" '0-9'
+}
+
 reject_unsafe "--node-id" "$NODE_ID" 'a-zA-Z0-9_.\-'
-reject_unsafe "--master-addr" "$MASTER_ADDR" 'a-zA-Z0-9_.\-:'
+check_master_addr
 reject_unsafe "--token-file contents" "$TOKEN" 'a-zA-Z0-9_.\-'
 if [ -n "$TAGS" ]; then
   reject_unsafe "--tags" "$TAGS" 'a-zA-Z0-9_.,\-'
 fi
 if [ -n "$TLS_SERVER_NAME" ]; then
-  reject_unsafe "--tls-server-name" "$TLS_SERVER_NAME" 'a-zA-Z0-9_.\-'
+  # ':' admits IPv6 literals.
+  reject_unsafe "--tls-server-name" "$TLS_SERVER_NAME" 'a-zA-Z0-9_.\-:'
 fi
 
 if [ "$TLS_DISABLED" = "true" ]; then
@@ -218,32 +254,69 @@ fi
 install -d /usr/local/bin /usr/local/lib/nut-server
 install -d -o root -g nut-server -m 0750 /etc/nut-server
 install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
-install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-slave
+
+CONFIG_PATH="/etc/nut-server/slave.yaml"
+if [ -L "$CONFIG_PATH" ]; then
+  echo "$CONFIG_PATH is a symlink; refusing to replace it" >&2
+  exit 1
+fi
+
+# -check-config below runs the sudo self-check as nut-server, so the sudoers
+# rules must be in place first.
 install -o root -g root -m 0440 "$SUDOERS_SOURCE" /etc/sudoers.d/nut-server-slave
 if command -v visudo >/dev/null 2>&1; then
   visudo -c -f /etc/sudoers.d/nut-server-slave >/dev/null
 fi
 
+CA_PATH="/etc/nut-server/ca.crt"
+CA_BACKUP=""
+CA_REPLACED="false"
+STAGED_BIN="/usr/local/bin/.nut-slave.new"
+TMP_CONFIG=""
+# Any exit before the commit point puts the previous ca.crt back, so a failed
+# run leaves an installed slave as it was.
+cleanup() {
+  rm -f "$TMP_CONFIG" "$STAGED_BIN"
+  if [ "$CA_REPLACED" = "true" ]; then
+    if [ -n "$CA_BACKUP" ]; then
+      mv -f "$CA_BACKUP" "$CA_PATH"
+    else
+      rm -f "$CA_PATH"
+    fi
+  fi
+}
+trap cleanup EXIT
+
 if [ -n "$TLS_CA_FILE" ]; then
-  install -o root -g root -m 0644 "$TLS_CA_FILE" /etc/nut-server/ca.crt
-  TLS_CA_FILE="/etc/nut-server/ca.crt"
+  if [ -f "$CA_PATH" ]; then
+    CA_BACKUP=$(mktemp "$CA_PATH.XXXXXX")
+    cp -p "$CA_PATH" "$CA_BACKUP"
+  fi
+  CA_REPLACED="true"
+  install -o root -g root -m 0644 "$TLS_CA_FILE" "$CA_PATH"
+  TLS_CA_FILE="$CA_PATH"
 fi
 
-CONFIG_PATH="/etc/nut-server/slave.yaml"
+# Keep dry_run from an existing config so re-running the installer (for
+# example with a rotated token) never flips a production slave back to dry-run.
+DRY_RUN="true"
 if [ -f "$CONFIG_PATH" ]; then
-  echo "config $CONFIG_PATH already exists, skipping generation"
-  # The master issues a new token with every install script and drops the old
-  # one, so an existing config must take the new token to stay registered.
-  sed -i "s|^token:.*|token: \"$TOKEN\"|" "$CONFIG_PATH"
-  echo "replaced token in existing $CONFIG_PATH"
-else
-  cat > "$CONFIG_PATH" <<EOF
+  OLD_DRY_RUN=$(awk '/^dry_run:/ { gsub(/"/, "", $2); print $2; exit }' "$CONFIG_PATH")
+  case "$OLD_DRY_RUN" in
+    true|false) DRY_RUN="$OLD_DRY_RUN" ;;
+  esac
+fi
+
+# The token reaches the file only through the heredoc, never through argv;
+# mktemp creates the file 0600 so it is not readable before the chmod.
+TMP_CONFIG=$(mktemp "$CONFIG_PATH.XXXXXX")
+cat > "$TMP_CONFIG" <<EOF
 node_id: "$NODE_ID"
 master_addr: "$MASTER_ADDR"
 token: "$TOKEN"
 state_file: "/var/lib/nut-server/slave-state.json"
 reconnect_interval: "5s"
-dry_run: true
+dry_run: $DRY_RUN
 tls:
   enabled: $TLS_ENABLED
   disabled: $TLS_DISABLED
@@ -260,28 +333,49 @@ shutdown_command:
   - "now"
 EOF
 
-  if [ -n "$TAGS" ]; then
-    printf 'tags:\n' >> "$CONFIG_PATH"
-    OLD_IFS=$IFS
-    IFS=,
-    set -- $TAGS
-    IFS=$OLD_IFS
-    for tag in "$@"; do
-      printf '  - "%s"\n' "$tag" >> "$CONFIG_PATH"
-    done
-  fi
-  echo "generated $CONFIG_PATH for node_id=$NODE_ID master_addr=$MASTER_ADDR"
+if [ -n "$TAGS" ]; then
+  printf 'tags:\n' >> "$TMP_CONFIG"
+  OLD_IFS=$IFS
+  IFS=,
+  set -- $TAGS
+  IFS=$OLD_IFS
+  for tag in "$@"; do
+    printf '  - "%s"\n' "$tag" >> "$TMP_CONFIG"
+  done
 fi
-chown root:nut-server "$CONFIG_PATH"
-chmod 0640 "$CONFIG_PATH"
+chown root:nut-server "$TMP_CONFIG"
+chmod 0640 "$TMP_CONFIG"
+
+# Check the new binary against the new config before replacing either, so a
+# failed check leaves an installed slave as it was.
+install -m 0755 "$BIN_SOURCE" "$STAGED_BIN"
+if ! runuser -u nut-server -- "$STAGED_BIN" -check-config -config "$TMP_CONFIG"; then
+  echo "config check failed; $CONFIG_PATH and /usr/local/bin/nut-slave were not changed" >&2
+  exit 1
+fi
+
+if [ -f "$CONFIG_PATH" ]; then
+  BACKUP_PATH="$CONFIG_PATH.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p "$CONFIG_PATH" "$BACKUP_PATH"
+  echo "backed up existing $CONFIG_PATH to $BACKUP_PATH; regenerated it with dry_run=$DRY_RUN (merge other custom settings back by hand)"
+fi
+mv -f "$TMP_CONFIG" "$CONFIG_PATH"
+mv -f "$STAGED_BIN" /usr/local/bin/nut-slave
+CA_REPLACED="false"
+if [ -n "$CA_BACKUP" ]; then
+  rm -f "$CA_BACKUP"
+fi
+echo "generated $CONFIG_PATH for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-slave.service
 systemctl daemon-reload
 
-if ! runuser -u nut-server -- /usr/local/bin/nut-slave -check-config -config "$CONFIG_PATH"; then
-  echo "config check failed; fix $CONFIG_PATH before starting nut-slave" >&2
-  exit 1
-fi
-
 echo "installed nut-slave"
-echo "run: systemctl enable --now nut-slave"
+# A re-run normally carries a newly issued token that invalidates the old
+# one, so a running slave must restart to pick up the new config.
+if systemctl is-active --quiet nut-slave; then
+  systemctl restart nut-slave
+  echo "restarted nut-slave"
+else
+  echo "run: systemctl enable --now nut-slave"
+fi

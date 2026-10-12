@@ -27,7 +27,7 @@ func (s *Server) runCommandWatcher(ctx context.Context) {
 }
 
 func (s *Server) emergencyRuntimeReached(upsStatus *UPSStatus) bool {
-	return upsStatus != nil && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes
+	return upsStatus != nil && upsStatus.OnBattery && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes
 }
 
 // emergencyTrigger returns why the master must power off right away, or "".
@@ -44,6 +44,20 @@ func (s *Server) emergencyTrigger(upsStatus *UPSStatus, now time.Time) string {
 	return ""
 }
 
+// awaitingReadingAfterPowerOffLocked reports whether the restored episode
+// already powered the master off and this process has not read the UPS yet.
+func (s *Server) awaitingReadingAfterPowerOffLocked() bool {
+	return s.episode != nil && s.episode.MasterPoweredOff && !s.upsConfirmed.Load()
+}
+
+// localShutdownBelongsToEpisodeLocked reports whether the local shutdown was
+// armed for the current episode: by its command, or by an emergency before the
+// episode had a command.
+func (s *Server) localShutdownBelongsToEpisodeLocked() bool {
+	return s.episode != nil && s.localShutdown != nil &&
+		(s.localShutdown.CommandID == s.episode.CommandID || s.localShutdown.CommandID == "")
+}
+
 func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 	if !s.cfg.LocalShutdown.Enabled {
 		return
@@ -56,16 +70,24 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 		replayNodes map[string]struct{}
 		dirty       bool
 	)
+	s.commandMu.Lock()
 	emergency := s.emergencyTrigger(upsStatus, now)
+	if emergency == protocol.LocalShutdownTriggerUPSUnreachable && s.awaitingReadingAfterPowerOffLocked() {
+		emergency = ""
+	}
 	// A silent UPS past unreachable_after is acted on even before the first
 	// reading of this process; waiting for one would never end.
 	trusted := s.upsConfirmed.Load() || emergency == protocol.LocalShutdownTriggerUPSUnreachable
-
-	s.commandMu.Lock()
 	if emergency == protocol.LocalShutdownTriggerUPSUnreachable && s.episode != nil {
 		s.upsConfirmed.Store(true)
 	}
 	state := s.localShutdown
+	if state != nil && s.episode != nil && trusted && emergency != "" &&
+		state.Phase != protocol.LocalShutdownPhaseExecuting && !s.localShutdownBelongsToEpisodeLocked() {
+		// A local shutdown left by a manual command, finished or still waiting
+		// with that command's dry_run, must not stand in for this emergency.
+		state = nil
+	}
 	if state == nil {
 		// Emergency is a safety net independent of any "all" command: during an
 		// episode the master powers itself off at critical runtime or when the
@@ -190,6 +212,9 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	s.localShutdown.LastError = ""
 	s.localShutdown.LastAttemptAt = &attemptAt
 	dryRun := s.localShutdown.DryRun
+	if !dryRun && s.episode != nil {
+		s.episode.MasterPoweredOff = true
+	}
 	seq, content := s.snapshotStateLocked()
 	s.commandMu.Unlock()
 	s.persistState(seq, content)
@@ -205,6 +230,9 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	if err != nil {
 		s.localShutdown.Phase = protocol.LocalShutdownPhaseFailed
 		s.localShutdown.LastError = err.Error()
+		if s.episode != nil {
+			s.episode.MasterPoweredOff = false
+		}
 		slog.Error("local shutdown failed, will retry",
 			"command_id", commandID,
 			"trigger", trigger,

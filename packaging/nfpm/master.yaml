@@ -53,5 +53,10 @@ contents:
       mode: 0750
 
 scripts:
+  preinstall: packaging/nfpm/master.preinst.sh
   postinstall: packaging/nfpm/master.postinst.sh
   preremove: packaging/nfpm/master.prerm.sh
+
+rpm:
+  scripts:
+    posttrans: packaging/nfpm/master.posttrans.sh

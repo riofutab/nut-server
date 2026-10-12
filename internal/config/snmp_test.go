@@ -24,9 +24,9 @@ func TestLoadMasterConfigSNMPVersion(t *testing.T) {
 		wantVersion string
 		wantErr     string
 	}{
-		{name: "empty defaults to 2c", snmp: `  version: ""`, wantVersion: "2c"},
-		{name: "v1", snmp: `  version: "1"`, wantVersion: "1"},
-		{name: "v2c", snmp: `  version: "2c"`, wantVersion: "2c"},
+		{name: "empty defaults to 2c", snmp: "  version: \"\"\n  community: public", wantVersion: "2c"},
+		{name: "v1", snmp: "  version: \"1\"\n  community: public", wantVersion: "1"},
+		{name: "v2c", snmp: "  version: \"2c\"\n  community: public", wantVersion: "2c"},
 		{name: "3", snmp: "  version: \"3\"\n  username: ups\n  security_level: noAuthNoPriv", wantVersion: "3"},
 		{name: "v3 normalizes to 3", snmp: "  version: v3\n  username: ups\n  security_level: noAuthNoPriv", wantVersion: "3"},
 		{name: "unknown", snmp: `  version: "2"`, wantErr: "snmp.version"},
@@ -264,15 +264,13 @@ func TestResolveSNMPVarsDoesNotShareProfileState(t *testing.T) {
 	}
 }
 
-func TestResolveSNMPVarsDefaultsRuntimeOverrideUnitToMinutes(t *testing.T) {
-	snmp := SNMPConfig{Runtime: &SNMPValueVar{OID: ".1.2.3"}}
+func TestResolveSNMPVarsRequiresUnitOnRuntimeOverride(t *testing.T) {
+	snmp := SNMPConfig{Profile: SNMPProfileAPC, Runtime: &SNMPValueVar{OID: ".1.2.3"}}
 
-	if err := ResolveSNMPVars(&snmp); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
+	err := ResolveSNMPVars(&snmp)
 
-	if snmp.Runtime.Unit != RuntimeUnitMinutes {
-		t.Fatalf("unit=%q want minutes", snmp.Runtime.Unit)
+	if err == nil || !strings.Contains(err.Error(), "snmp.runtime.unit") {
+		t.Fatalf("expected missing runtime unit to fail, got %v", err)
 	}
 }
 
@@ -302,6 +300,7 @@ func TestResolveSNMPVarsValidatesOverrides(t *testing.T) {
 
 func TestLoadMasterConfigParsesSNMPOverrides(t *testing.T) {
 	cfg, err := loadMasterWithSNMP(t, `
+  community: public
   profile: eaton
   runtime: { oid: ".1.2.3", unit: timeticks }
 `)
@@ -320,4 +319,49 @@ func TestLoadMasterConfigParsesSNMPOverrides(t *testing.T) {
 // indent nests a flat YAML block under the snmp key.
 func indent(block string) string {
 	return "  " + strings.ReplaceAll(block, "\n", "\n  ") + "\n"
+}
+
+func TestLoadMasterConfigRequiresCommunityForV1AndV2c(t *testing.T) {
+	for _, version := range []string{"1", "2c"} {
+		t.Run(version, func(t *testing.T) {
+			_, err := loadMasterWithSNMP(t, "  version: \""+version+"\"\n")
+
+			if err == nil || !strings.Contains(err.Error(), "snmp.community") {
+				t.Fatalf("expected missing community to fail, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMasterConfigBoundsSNMPTimeout(t *testing.T) {
+	cases := []struct {
+		name        string
+		timeout     string
+		wantTimeout int
+		wantErr     string
+	}{
+		{name: "zero defaults", timeout: "0", wantTimeout: 2},
+		{name: "lower bound", timeout: "1", wantTimeout: 1},
+		{name: "upper bound", timeout: "60", wantTimeout: 60},
+		{name: "negative", timeout: "-1", wantErr: "snmp.timeout_seconds"},
+		{name: "above upper bound", timeout: "61", wantErr: "snmp.timeout_seconds"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadMasterWithSNMP(t, "  community: public\n  timeout_seconds: "+tc.timeout+"\n")
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.SNMP.TimeoutSeconds != tc.wantTimeout {
+				t.Fatalf("timeout_seconds=%d want %d", cfg.SNMP.TimeoutSeconds, tc.wantTimeout)
+			}
+		})
+	}
 }

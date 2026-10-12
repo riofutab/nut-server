@@ -1,12 +1,15 @@
 package master
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"nut-server/internal/version"
@@ -52,6 +55,14 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "cannot determine master_addr; set public_addr in master.yaml")
 		return
 	}
+	if !isValidInstallMasterAddr(masterAddr) {
+		writeJSONError(w, http.StatusBadRequest, "master_addr must be host:port or [ipv6]:port with a host of only alphanumerics, '-', '_', '.'")
+		return
+	}
+	if isLoopbackHost(requestHostWithoutPort(masterAddr)) {
+		writeJSONError(w, http.StatusServiceUnavailable, "master_addr resolves to loopback; set public_addr in master.yaml")
+		return
+	}
 	repo := s.cfg.InstallRepo
 	if repo == "" {
 		repo = defaultInstallRepo
@@ -68,7 +79,14 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "cannot read the CA for the install script (install_ca_file or tls.cert_file)")
 			return
 		}
-		params.caPEM = caPEM
+		// The file may be a combined cert+key PEM; only certificates may leave
+		// the master.
+		params.caPEM = certificatePEM(caPEM)
+		if params.caPEM == nil {
+			slog.Error("CA for install script has no certificate", "path", caFile)
+			writeJSONError(w, http.StatusInternalServerError, "the CA for the install script (install_ca_file or tls.cert_file) contains no certificate")
+			return
+		}
 		params.serverName = requestHostWithoutPort(masterAddr)
 	}
 
@@ -103,6 +121,26 @@ func renderInstallScript(p installScriptParams) string {
 	fmt.Fprintf(&b, "sudo bash \"$work_dir/install-online.sh\" --role slave --version %s --repo %s -- \\\n", shellQuote(p.releaseTag), shellQuote(p.repo))
 	fmt.Fprintf(&b, "  --node-id %s --master-addr %s --token-file \"$work_dir/token\"%s\n", shellQuote(p.nodeID), shellQuote(p.masterAddr), tlsArgs)
 	return b.String()
+}
+
+// certificatePEM re-encodes only the CERTIFICATE blocks of data, or returns nil
+// when there are none.
+func certificatePEM(data []byte) []byte {
+	var out bytes.Buffer
+	for {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			_ = pem.Encode(&out, &pem.Block{Type: block.Type, Bytes: block.Bytes})
+		}
+		data = rest
+	}
+	if out.Len() == 0 {
+		return nil
+	}
+	return out.Bytes()
 }
 
 func wrapBase64(data []byte) string {
@@ -158,10 +196,49 @@ func listenAddrPort(addr string) string {
 }
 
 func isValidInstallNodeID(id string) bool {
-	if len(id) == 0 || len(id) > maxInstallNodeIDLen {
+	return len(id) <= maxInstallNodeIDLen && isInstallScriptName(id)
+}
+
+// isValidInstallMasterAddr accepts host:port or [ipv6]:port under the same
+// rules install-slave.sh applies to --master-addr and --tls-server-name (the
+// host is also the TLS server name), so a script the master hands out never
+// fails validation after the node's token has been rotated.
+func isValidInstallMasterAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
 		return false
 	}
-	for _, r := range id {
+	if strings.Contains(host, ":") {
+		// SplitHostPort only yields a colon in the host for the bracketed form;
+		// ParseIP rejects zones, which the script does not allow either.
+		if net.ParseIP(host) == nil {
+			return false
+		}
+	} else if !isInstallScriptName(host) {
+		return false
+	}
+	if strings.Trim(port, "0123456789") != "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0 && n <= 65535
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isInstallScriptName reports whether s is non-empty and contains only
+// alphanumerics, '-', '_' and '.'.
+func isInstallScriptName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
 		switch {
 		case r >= 'a' && r <= 'z':
 		case r >= 'A' && r <= 'Z':

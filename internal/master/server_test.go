@@ -608,7 +608,7 @@ func TestResetActiveCommandStopsReplayOfClearedShutdown(t *testing.T) {
 	}
 }
 
-func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
+func TestResetActiveCommandClearsIssuedFlagAndKeepsEpisode(t *testing.T) {
 	server := NewServer(config.MasterConfig{})
 	server.shutdownIssued.Store(true)
 	server.activeCommand = "shutdown-1"
@@ -622,8 +622,8 @@ func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
 	if server.activeCommand != "" {
 		t.Fatalf("expected active command cleared")
 	}
-	if server.episode != nil {
-		t.Fatalf("expected episode cleared")
+	if server.episode == nil || server.episode.CommandID != "" {
+		t.Fatalf("expected the episode kept without its command, got %+v", server.episode)
 	}
 }
 

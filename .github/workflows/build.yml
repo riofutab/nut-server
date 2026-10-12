@@ -49,6 +49,23 @@ jobs:
             dist/linux-amd64
             dist/linux-arm64
 
+  shell-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Check shell scripts
+        run: |
+          status=0
+          for f in scripts/*.sh packaging/nfpm/*.sh; do
+            dash -n "$f" || status=1
+            bash -n "$f" || status=1
+          done
+          shellcheck --version
+          shellcheck -S warning scripts/*.sh packaging/nfpm/*.sh || status=1
+          exit "$status"
+
   # Installs the .deb packages on a real systemd host and checks that the shipped
   # unit + sudoers let the services pass their shutdown-command self-check.
   #
@@ -193,6 +210,52 @@ jobs:
             fi
             if [ "$before" = "$after" ]; then
               echo "::error::$unit was not restarted onto the new binary"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      # Packages before v0.6.0 stop and disable the service in prerm on every
+      # upgrade, before any script of the new package runs. Build the current
+      # tree as 0.5.99 with that prerm, then upgrade it to 0.6.99: the service
+      # stays stopped and postinst prints the commands to start it again.
+      - name: Upgrade from a pre-v0.6.0 package prints the restart commands
+        run: |
+          build_deb() {
+            role="$1"
+            version="$2"
+            prerm="$3"
+            sed \
+              -e 's|${NFPM_ARCH}|amd64|g' \
+              -e 's|${BUILD_ARCH}|amd64|g' \
+              -e "s|\${VERSION}|$version|g" \
+              -e "s|packaging/nfpm/$role.prerm.sh|$prerm|" \
+              "packaging/nfpm/$role.yaml" > "/tmp/nfpm-$role.yaml"
+            nfpm pkg --config "/tmp/nfpm-$role.yaml" --packager deb --target "/tmp/nut-${role}_${version}.deb"
+          }
+          status=0
+          for role in slave master; do
+            unit="nut-$role"
+            printf '#!/bin/sh\nsystemctl stop %s || true\nsystemctl disable %s || true\n' "$unit" "$unit" > "/tmp/old-$role.prerm.sh"
+            build_deb "$role" 0.5.99-ci "/tmp/old-$role.prerm.sh"
+            build_deb "$role" 0.6.99-ci "packaging/nfpm/$role.prerm.sh"
+            sudo dpkg -i "/tmp/nut-${role}_0.5.99-ci.deb"
+            out=$(sudo dpkg -i "/tmp/nut-${role}_0.6.99-ci.deb" 2>&1) || status=1
+            printf '%s\n' "$out"
+            if ! printf '%s\n' "$out" | grep -q "package stopped and disabled $unit during this upgrade"; then
+              echo "::error::$unit postinst did not print the restart commands"
+              status=1
+            fi
+            if ! printf '%s\n' "$out" | grep -qF "sudo systemctl enable --now $unit"; then
+              echo "::error::$unit postinst did not print the enable command"
+              status=1
+            fi
+            if printf '%s\n' "$out" | grep -q "restarted on the new version"; then
+              echo "::error::$unit postinst reported a restart that did not happen"
+              status=1
+            fi
+            if systemctl is-active --quiet "$unit"; then
+              echo "::error::$unit is running after the old prerm stopped it"
               status=1
             fi
           done

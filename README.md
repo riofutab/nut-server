@@ -3,21 +3,23 @@
 [![CI](https://github.com/riofutab/nut-server/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/riofutab/nut-server/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/riofutab/nut-server?sort=semver)](https://github.com/riofutab/nut-server/releases/latest)
 [![License](https://img.shields.io/github/license/riofutab/nut-server)](LICENSE)
-[![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](go.mod)
 
 > **Lightweight NUT-style UPS shutdown orchestrator for homelabs and small fleets.**
 > 轻量 NUT 风格 UPS 关机编排,适合 homelab 与小型机房:master 通过 SNMP 轮询 UPS, slave 主动注册并在策略命中时执行关机, 全程 mTLS / Bearer token / Prometheus 可观测、`.deb` / `.rpm` / `.tar.gz` 三件套发布。
 
 ## Quick start
 
-在 master 主机一行装好(`--token` 是 enrollment token,slave 首次注册时使用):
+v0.6.0 正式版发布前,`--version latest` 会装到 v0.5.1,它的安装脚本与本文档不一致,所以下面的命令固定使用 `--version v0.6.0-rc.1`。
+
+在 master 主机一行装好(`--token-file` 指向存放 enrollment token 的文件,slave 首次注册时使用这个 token;`admin_token` 由脚本自动生成):
 
 ```bash
-ENROLL_TOKEN=$(openssl rand -hex 24); echo "$ENROLL_TOKEN"   # 记下来,装 slave 时要用
+sudo install -m 0600 /dev/null /root/nut-enroll-token
+openssl rand -hex 24 | sudo tee /root/nut-enroll-token   # 记下来,装 slave 时要用
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo bash -s -- --role master --version latest -- \
-      --token "$ENROLL_TOKEN" \
-      --admin-token "$(openssl rand -hex 24)" \
+  | sudo bash -s -- --role master --version v0.6.0-rc.1 -- \
+      --token-file /root/nut-enroll-token \
       --snmp-target 10.0.0.31
 ```
 
@@ -27,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/
 sudo install -m 0600 /dev/null /root/nut-enroll-token
 printf '%s\n' 'your-enrollment-token' | sudo tee /root/nut-enroll-token >/dev/null
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo bash -s -- --role slave --version latest -- \
+  | sudo bash -s -- --role slave --version v0.6.0-rc.1 -- \
       --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 
@@ -49,7 +51,7 @@ flowchart LR
 
 每台 slave 通过 TCP/TLS 长连接挂在 master 上,断线自动指数 backoff 重连;master 收到 UPS 触发条件后按多策略合并出 target 集合,并发下发 shutdown,等远端 `executed` 回执后(可选)再关本机。
 
-仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是 [v0.6.0](https://github.com/riofutab/nut-server/releases/tag/v0.6.0)。
+仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是预发布版 [v0.6.0-rc.1](https://github.com/riofutab/nut-server/releases/tag/v0.6.0-rc.1)。
 
 UPS 读取由 `snmp.profile` 决定 OID:默认 `ups-mib`(RFC 1628 UPS-MIB),另有 `apc` / `cyberpower` / `eaton`;单项 OID 可用 `snmp.on_battery` / `snmp.charge` / `snmp.runtime` 覆盖。
 
@@ -99,8 +101,8 @@ UPS 读取由 `snmp.profile` 决定 OID:默认 `ups-mib`(RFC 1628 UPS-MIB),另�
 ### 部署与运维
 - **发布产物**: `.deb` / `.rpm` / `.tar.gz` × amd64 / arm64,附带 `SHA256SUMS`
 - **`install-online.sh`** 自动检测 `apt` / `yum` / `dnf` 选包格式;`--` 后传 role-script 参数会自动走 tar.gz 路径预填配置
-- **配置严格校验** (v0.6.0+): 未知字段直接报错;`nut-master -check-config` / `nut-slave -check-config` 只校验配置和关机权限,安装与升级脚本在启动服务前都会跑一遍
-- **systemd 沙箱化**: master 走 `User=nut-server`,`ProtectSystem=strict`、`ProtectHome`、`PrivateTmp`、`RestrictAddressFamilies` 等全套
+- **配置严格校验** (v0.6.0+): 未知字段直接报错;`nut-master -check-config` / `nut-slave -check-config` 只校验配置、TLS 证书和关机权限,安装与升级脚本在启动服务前都会跑一遍
+- **systemd 沙箱化**: master 走 `User=nut-server`,`ProtectSystem=strict`、`ProtectHome`、`PrivateTmp` 等全套
 - **状态文件原子写**: tmp + `fsync` + rename,`0600` 权限,崩溃中途不会留半截文件
 - **优雅停机**: SIGTERM / SIGINT 通过 `context.Context` 传到所有 goroutine,systemd stop 不触发 timeout
 - **e2e 集成测试套件** (v0.3.0+): `internal/e2e/` 包 + `e2e` build tag,在 loopback 上真的拉起 master + slave,CI 已接入
@@ -199,15 +201,16 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `public_addr`: 装机脚本里写给 slave 的 `master_addr`；master 开了 TLS 时，它的主机名也作为脚本里的 `--tls-server-name`。留空时取请求的 Host header 加 `listen_addr` 端口
 - `install_repo`: 装机脚本拉取 `install-online.sh` 的 GitHub 仓库，留空为 `riofutab/nut-server`
 - `install_ca_file`: 装机脚本写给 slave 的 CA（仅 `tls` 开启时可用）。建议填签发 master 证书的 CA，master 换证书时 slave 不用改；留空时内嵌 `tls.cert_file`
-- `state_file`: master 本地状态文件，保存 active command、节点回执、节点目录和各节点专属 token 的 SHA-256，便于重启恢复
+- `state_file`: master 本地状态文件，保存 active command、节点回执、节点目录和各节点专属 token 的 SHA-256，便于重启恢复。文件无法解析时改名为 `<state_file>.corrupt-<UTC 时间>`、记错误日志并以空状态启动；节点的 token 绑定随之丢失，除非手动恢复该文件，节点要重新注册
 - `enrollment_tokens`（v0.6.0+）：slave 首次注册用的 token 列表。某个 `node_id` 首次注册成功后，master 给它签发专属 token，之后该 `node_id` 只能用专属 token 注册
 - `enrollment`（v0.6.0+）：`open`（默认）或 `closed`。`closed` 时新 `node_id` 注册会被拒（`enrollment closed`），已签发 token 的节点不受影响；`closed` 时 `enrollment_tokens` 可以留空
+- `poll_interval` / `command_timeout` / `offline_after` 必须大于 0；不写或写 0 时用默认值，负数启动失败
 - `poll_interval`: SNMP 轮询间隔
 - `command_timeout`: shutdown 命令等待终态的最长时间，超时节点会记为 `timeout`
 - `offline_after`：节点 `last_seen` 超过该窗口后在 `/status` 中显示为 `offline`，默认 `45s`
 - `dry_run`: 是否仅验证链路而不执行真实关机
 - `local_shutdown.enabled`: 是否让 master 在远端节点处理后再关闭本机
-- `local_shutdown.command`: master 本机关机时执行的命令，默认 `/sbin/shutdown -h now`
+- `local_shutdown.command`: master 本机关机时执行的命令，默认 `["/usr/bin/sudo","-n","/sbin/shutdown","-h","now"]`（经随包的 `/etc/sudoers.d/nut-server-master` 放行）
 - `local_shutdown.max_wait`: 等待远端节点完成的最长时间
 - `local_shutdown.emergency_runtime_minutes`: 等待期间触发“最后补发一次远端关机并立即关闭本机”的紧急阈值
 - `local_shutdown.unreachable_after`（v0.6.0+）：断电期间 UPS 连续这么久没有应答时，按紧急情况关本机（trigger `ups_unreachable`）。默认等于 `max_wait`
@@ -219,17 +222,17 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `tls.require_client_cert`: 是否要求 slave 提供并校验客户端证书
 - `shutdown_policies`（**必填，至少一条**）: 关机策略。策略只在 UPS 走电池时评估。每条 policy 内部 AND, 多条 OR。命中多条时 target 取并集 (任一 `all:true` 则关全部; 否则 tags/node_ids 并集), reason 拼接成 `a; b`。字段:
   - `name` (必填, 唯一)
-  - `when.charge_below` / `when.runtime_below`: 电量低于百分比 / 剩余运行时间低于分钟数。`when` 为空表示一走电池就触发
-  - `when.ups_unreachable_for`（v0.6.0+）: 断电期间（最后一次成功读数显示走电池）UPS 连续这么久没有应答就触发。只能单独使用，不能与 `charge_below` / `runtime_below` 或 `duration` 组合。从最后一次成功读数开始计时；master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时，到时照常触发，并恢复对重启前那条关机命令的重放和重试
+  - `when.charge_below` / `when.runtime_below`: 电量低于百分比 / 剩余运行时间低于分钟数。`when` 为空表示一走电池就触发。`charge_below` 取 1..100；显式写 `charge_below: 0`、`runtime_below: 0` 或 `ups_unreachable_for: 0s` 会被拒绝（要一走电池就触发就删掉该字段），`duration: 0s` 可以
+  - `when.ups_unreachable_for`（v0.6.0+）: 断电期间（最后一次成功读数显示走电池）UPS 连续这么久没有应答就触发。只能单独使用，不能与 `charge_below` / `runtime_below` 或 `duration` 组合。从最后一次成功读数开始计时；master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时，到时照常触发，并恢复对重启前那条关机命令的重放和重试。master 在这次断电中自己真实关机后再开机时，读到 UPS 之前不启用失联兜底
   - `duration`（v0.6.0+，默认 0 即立即触发）: 条件需连续满足这么久才触发。轮询失败不清零计时，也不触发；触发需要一次新的命中读数。master 重启或新的一次断电都会重新计时
   - `target.all` / `target.tags` / `target.node_ids` (全空 → 默认 `all:true`)
   - `reason` (可选, 缺省自动生成)
-- `snmp.target` / `snmp.port` / `snmp.timeout_seconds`: UPS 地址、端口（默认 161）、超时
-- `snmp.version`: `1`、`2c`（默认）或 `3`。`snmp.community` 只用于 v1 / v2c，v3 下写了会启动失败
+- `snmp.target` / `snmp.port` / `snmp.timeout_seconds`: UPS 地址、端口（默认 161）、超时秒数（1..60，不写或写 0 为 2）
+- `snmp.version`: `1`、`2c`（默认）或 `3`。`snmp.community` 只用于 v1 / v2c，v1 / v2c 下必填（留空启动失败），v3 下写了会启动失败
 - `snmp.profile`（v0.6.0+）: OID 预设，`ups-mib`（默认，RFC 1628）、`apc`、`cyberpower`、`eaton`。后三个厂商预设未经真机验证，上线前请用 `snmpget` 核对
 - `snmp.on_battery: {oid, values}`: 覆盖「是否走电池」的 OID，读数等于 `values` 中任一值即视为走电池
 - `snmp.charge: {oid}`: 覆盖电量百分比 OID
-- `snmp.runtime: {oid, unit}`: 覆盖剩余运行时间 OID，`unit` 为 `minutes`（缺省）、`seconds` 或 `timeticks`（1/100 秒），统一换算成分钟并向下取整
+- `snmp.runtime: {oid, unit}`: 覆盖剩余运行时间 OID，`unit` 必填，取 `minutes`、`seconds` 或 `timeticks`（1/100 秒），统一换算成分钟并向下取整。OID 返回 TimeTicks 而 `unit` 不是 `timeticks` 时轮询失败，报 `set snmp.runtime.unit: timeticks`
 - SNMPv3（`snmp.version: "3"`）:
   - `snmp.username`（必填）
   - `snmp.security_level`: `noAuthNoPriv`、`authNoPriv` 或 `authPriv`
@@ -262,7 +265,7 @@ snmp:
 - `master_addr`: master 地址
 - `token`: 注册 token。手动安装时填 master 的 enrollment token；通过 master 装机脚本安装时是该节点的专属 token
 - `tags`: 可选节点标签，用于按标签定向下发 shutdown
-- `state_file`: slave 本地状态文件（0600），保存已处理的 command_id（防止重启后重复执行）和 master 签发的专属 token。存有专属 token 时优先用它注册，被 master 以 `invalid token` 拒绝后清掉并改用 `token`。详见 [docs/slave.md](docs/slave.md)
+- `state_file`: slave 本地状态文件（0600），保存已处理的 command_id（防止重启后重复执行）和 master 签发的专属 token。存有专属 token 时优先用它注册，被 master 以 `invalid token` 拒绝后清掉并改用 `token`。文件无法解析时改名为 `<state_file>.corrupt-<UTC 时间>`、记错误日志，改用配置里的 `token`。详见 [docs/slave.md](docs/slave.md)
 - `metrics_listen_addr`（v0.3.0+，可选）：留空则不暴露;设为回环地址(例如 `127.0.0.1:9101`)启用 `/metrics`,**不鉴权**
 - `reconnect_interval`: 断线重连间隔
 - `dry_run`: true 时收到 shutdown 只记录日志并回 `simulated` ACK
@@ -273,7 +276,7 @@ snmp:
 - `tls.ca_file`: 用于校验 master 证书的 CA 文件
 - `tls.server_name`: TLS 校验证书时使用的服务端名称
 - `tls.insecure_skip_verify`: 是否跳过服务端证书校验，仅建议测试环境使用
-- `shutdown_command`: 真实关机命令
+- `shutdown_command`: 真实关机命令，默认 `["/usr/bin/sudo","-n","/sbin/shutdown","-h","now"]`；显式写空列表启动失败
 
 ## TLS / mTLS
 
@@ -360,17 +363,17 @@ dry_run: true
 - 二进制：`/usr/local/bin/nut-master`、`/usr/local/bin/nut-slave`
 - 配置：`/etc/nut-server/master.yaml`、`/etc/nut-server/slave.yaml`
 - systemd unit：`packaging/systemd/nut-master.service`、`packaging/systemd/nut-slave.service`
-- 服务用户：master 与 slave 都以 `nut-server` 用户运行，分别通过 `/etc/sudoers.d/nut-server-slave` / `nut-server-master` 受限授权 `shutdown` 命令。systemd unit 只用文件系统隔离（`ProtectSystem=strict` 等）；会隐式开启 `NoNewPrivileges` 的选项被刻意去掉，否则 sudo 关机会失败。两端启动时都会自检关机命令能否执行。
+- 服务用户：master 与 slave 都以 `nut-server` 用户运行，分别通过 `/etc/sudoers.d/nut-server-slave` / `nut-server-master` 受限授权 `shutdown` 命令。systemd unit 只用文件系统隔离（`ProtectSystem=strict` 等）；会隐式开启 `NoNewPrivileges` 的选项被刻意去掉，否则 sudo 关机会失败。两端启动时都会自检关机命令能否执行，规则见 [docs/slave.md](docs/slave.md)。
 
 ### 方案 A：apt / yum / dnf 一键安装（推荐）
 
 ```bash
 # 在线脚本会自动检测包管理器，下载已校验的 .deb 或 .rpm
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo sh -s -- --role master --version latest
+  | sudo sh -s -- --role master --version v0.6.0-rc.1
 
 curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/install-online.sh \
-  | sudo sh -s -- --role slave --version latest
+  | sudo sh -s -- --role slave --version v0.6.0-rc.1
 ```
 
 包安装会自动建 `nut-server` 用户、装 sudoers、把配置目录设为 `root:nut-server`（服务只读），并在 master 首次安装时随机生成 `admin_token` 写入 `/etc/nut-server/master.yaml`。安装完成后还需要改配置、以服务用户校验，再启动：
@@ -387,7 +390,7 @@ sudo -u nut-server /usr/local/bin/nut-slave -check-config -config /etc/nut-serve
 sudo systemctl enable --now nut-slave
 ```
 
-`-check-config` 只加载并校验配置，再做一次关机权限自检（master 仅在 `local_shutdown.enabled` 且非 dry-run 时检查，slave 在非 dry-run 时检查），然后退出：通过时输出 `config ok: <路径>`、退出码 0；失败时向 stderr 输出 `config check failed: <路径>: <错误>`、退出码 1。要用 `nut-server` 用户运行，用 root 运行时 sudo 权限检查总能通过，结果没有参考价值。
+`-check-config` 加载并校验配置，加载配置里的 TLS 证书和私钥（master 的 `tls` 证书 / 私钥 / CA、`admin_tls` 证书 / 私钥，slave 的 `tls` 证书 / 私钥 / `ca_file`，dry-run 下也加载），再做一次关机权限自检（master 仅在 `local_shutdown.enabled` 且非 dry-run 时检查，slave 在非 dry-run 时检查），然后退出：通过时输出 `config ok: <路径>`、退出码 0；失败时向 stderr 输出 `config check failed: <路径>: <错误>`、退出码 1。要用 `nut-server` 用户运行，用 root 运行时 sudo 权限检查总能通过，结果没有参考价值。
 
 `--pkg` 可以强制安装格式：`--pkg deb` / `--pkg rpm` / `--pkg tar`（默认 `auto`）。
 
@@ -396,15 +399,15 @@ sudo systemctl enable --now nut-slave
 适合一次性预填 token、SNMP 目标等参数的场景：
 
 ```bash
-sudo ./scripts/install-online.sh --role master --version latest -- \
-  --token your-enrollment-token --admin-token "$(openssl rand -hex 24)" --snmp-target 10.0.0.31
-
 # token 文件只需 root 可读，内容是 master 的 enrollment token
-sudo ./scripts/install-online.sh --role slave --version latest -- \
+sudo ./scripts/install-online.sh --role master --version v0.6.0-rc.1 -- \
+  --token-file /root/nut-enroll-token --snmp-target 10.0.0.31
+
+sudo ./scripts/install-online.sh --role slave --version v0.6.0-rc.1 -- \
   --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 
-只要 `--` 后面带了 role-script 参数，`install-online.sh` 会自动走 tar.gz 路径让脚本预填配置。master 的 `--token` 写入 `enrollment_tokens`；slave 只接受 `--token-file`，token 不出现在命令行参数里。安装脚本在启动服务前会以 `nut-server` 用户运行 `-check-config`，不通过就中止。
+只要 `--` 后面带了 role-script 参数，`install-online.sh` 会自动走 tar.gz 路径让脚本预填配置。master 和 slave 都只接受 `--token-file`，token 不出现在命令行参数里；master 读到的 token 写入 `enrollment_tokens`，`admin_token` 由脚本自动生成。安装脚本在启动服务前会以 `nut-server` 用户运行 `-check-config`，不通过就中止。
 
 ### 方案 C: 由 master 生成装机脚本（v0.6.0+）
 
@@ -418,12 +421,12 @@ curl -fsS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 bash install-db-01.sh && rm install-db-01.sh
 ```
 
-从 master 本机请求 `127.0.0.1` 时，脚本里的 `master_addr` 取自 `public_addr`，所以要先在 master.yaml 里配好 `public_addr`（例如 `10.0.0.10:9000`），否则 slave 会被指向 `127.0.0.1`。脚本固定使用与 master 相同的 release 版本；master 开了 TLS 时脚本内嵌 CA 并设置 `--tls-server-name`。脚本里含有 token，用完删掉。用法和注意事项见 [docs/master.md](docs/master.md)。
+从 master 本机请求 `127.0.0.1` 时，脚本里的 `master_addr` 取自 `public_addr`，所以要先在 master.yaml 里配好 `public_addr`（例如 `10.0.0.10:9000`），否则接口返回 `503`。脚本固定使用与 master 相同的 release 版本；master 开了 TLS 时脚本内嵌 CA 并设置 `--tls-server-name`。脚本里含有 token，用完删掉。用法和注意事项见 [docs/master.md](docs/master.md)。
 
 如果你已经把发布包解压到本地，也可以直接调用：
 
 ```bash
-sudo ./scripts/install-master.sh --token your-enrollment-token --admin-token "$(openssl rand -hex 24)" --snmp-target 10.0.0.31
+sudo ./scripts/install-master.sh --token-file /root/nut-enroll-token --snmp-target 10.0.0.31
 sudo ./scripts/install-slave.sh  --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 
@@ -454,7 +457,13 @@ sudo ./scripts/install-slave.sh  --node-id slave-01 --master-addr 10.0.0.10:9000
 TOKEN=$(sudo awk '/^admin_token:/ {print $2}' /etc/nut-server/master.yaml | tr -d '"')
 
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9001/status
+
+# reset 停止重放当前命令和本次断电的命令，取消尚未开始执行的本机关机。
+# 断电期间 episode 和已触发的策略记录保留：已触发的策略在市电恢复前不会再触发，
+# 还没触发的策略仍会触发并下发新命令；local_shutdown 的紧急条件
+# （emergency_runtime_minutes、unreachable_after）仍会关 master。
 curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/commands/reset
+
 curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/commands/shutdown \
   -H 'Content-Type: application/json' \
   -d '{"reason":"manual test","node_ids":["slave-01"]}'
@@ -480,8 +489,10 @@ curl -H "Authorization: Bearer $TOKEN" -X DELETE http://127.0.0.1:9001/nodes/sla
 ```yaml
 local_shutdown:
   enabled: true
+  command: ["/usr/bin/sudo", "-n", "/sbin/shutdown", "-h", "now"]
   max_wait: "15m"
-  emergency_runtime_minutes: 15
+  # 应低于各策略的 runtime_below，否则一进入等待远端阶段就会立即关本机
+  emergency_runtime_minutes: 3
 ```
 
 触发关机后，master 会先等远端节点都拿到终态，然后再关掉自己。四种触发方式：

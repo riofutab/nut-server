@@ -13,7 +13,7 @@ import (
 )
 
 func TestLoadAdminTLSConfigReturnsNilWhenUnset(t *testing.T) {
-	tlsConfig, err := loadAdminTLSConfig(config.AdminTLSConfig{})
+	tlsConfig, err := config.AdminTLSConfig{}.TLSConfig()
 
 	if err != nil || tlsConfig != nil {
 		t.Fatalf("expected no TLS config and no error, got %v, %v", tlsConfig, err)
@@ -25,10 +25,10 @@ func TestLoadAdminTLSConfigRequiresTLS12(t *testing.T) {
 	certPEM, keyPEM := generateSignedCertificate(t, caCert, caKey, false, []string{"localhost"})
 	dir := t.TempDir()
 
-	tlsConfig, err := loadAdminTLSConfig(config.AdminTLSConfig{
+	tlsConfig, err := config.AdminTLSConfig{
 		CertFile: writePEMFile(t, dir, "admin.crt", certPEM),
 		KeyFile:  writePEMFile(t, dir, "admin.key", keyPEM),
-	})
+	}.TLSConfig()
 
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -39,7 +39,7 @@ func TestLoadAdminTLSConfigRequiresTLS12(t *testing.T) {
 }
 
 func TestLoadAdminTLSConfigFailsOnMissingFile(t *testing.T) {
-	_, err := loadAdminTLSConfig(config.AdminTLSConfig{CertFile: "/nonexistent/admin.crt", KeyFile: "/nonexistent/admin.key"})
+	_, err := config.AdminTLSConfig{CertFile: "/nonexistent/admin.crt", KeyFile: "/nonexistent/admin.key"}.TLSConfig()
 
 	if err == nil {
 		t.Fatal("expected an error for a missing certificate")
@@ -67,10 +67,10 @@ func TestAdminServerServesHTTPSWithAdminTLS(t *testing.T) {
 	caPEM, _, caCert, caKey := generateCertificateAuthority(t)
 	certPEM, keyPEM := generateSignedCertificate(t, caCert, caKey, false, []string{"localhost"})
 	dir := t.TempDir()
-	tlsConfig, err := loadAdminTLSConfig(config.AdminTLSConfig{
+	tlsConfig, err := config.AdminTLSConfig{
 		CertFile: writePEMFile(t, dir, "admin.crt", certPEM),
 		KeyFile:  writePEMFile(t, dir, "admin.key", keyPEM),
-	})
+	}.TLSConfig()
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

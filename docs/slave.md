@@ -24,7 +24,15 @@ v0.2.0 起 slave 不再以 root 运行，systemd unit 用 `User=nut-server`。�
 
 如果你的发行版 `shutdown` 路径不同（比如 `/usr/sbin/shutdown`），改 `/etc/nut-server/slave.yaml` 的 `shutdown_command` 即可，sudoers 模板已经覆盖常见路径。
 
-v0.5.2 起 slave（非 dry-run）启动时会用 `sudo -n -l` 检查关机命令能否执行，结果写进日志（`shutdown command self-check passed` / `failed`）、指标 `nut_slave_shutdown_ready`，并在注册时报告给 master。检查失败不会退出进程。systemd unit 刻意没有使用 `NoNewPrivileges`、`LockPersonality`、`RestrictAddressFamilies` 等选项，它们会隐式禁止 sudo 提权。
+v0.5.2 起 slave（非 dry-run）启动时会用 `sudo -n -l` 检查关机命令能否执行，结果写进日志（`shutdown command self-check passed` / `failed`）、指标 `nut_slave_shutdown_ready`，并在注册时报告给 master。检查失败不会退出进程。
+
+自检规则：
+
+- sudo 只接受 `-n`、`-u` / `--user`、`-g` / `--group` 和 `--`，带其它选项直接判为失败。
+- 进程不是 root 时，不经 sudo、命令名（basename）为 `shutdown`、`poweroff`、`halt`、`reboot` 或 `systemctl` 的命令判为未就绪。
+- 已知限制：sudo 默认 `listpw=any`，该用户另有任意一条 NOPASSWD 规则时检查可能通过。随包的 sudoers 文件不受影响。
+
+`shutdown_command` 不写时默认就是上面的 sudo 命令；显式写空列表启动失败。systemd unit 刻意没有使用 `NoNewPrivileges`、`LockPersonality`、`RestrictAddressFamilies` 等选项，它们会隐式禁止 sudo 提权。
 
 ## 推荐：用 master 生成的装机脚本
 
@@ -40,23 +48,31 @@ printf '%s\n' 'your-enrollment-token' | sudo tee /root/nut-enroll-token >/dev/nu
 sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
 
-v0.6.0 起安装脚本不再接受 `--token`。`/etc/nut-server/slave.yaml` 已存在时，脚本只替换其中的 `token`。启动服务前脚本会以 `nut-server` 用户运行 `nut-slave -check-config`，不通过就中止。
+v0.6.0 起安装脚本不再接受 `--token`。安装脚本（master 生成的装机脚本也调用它）的行为：
+
+- 先用新二进制以 `nut-server` 用户对新配置运行 `-check-config`，不通过就中止，什么都不替换。
+- `/etc/nut-server/slave.yaml` 已存在时重新生成整个文件，旧文件备份为 `slave.yaml.bak-<UTC 时间>`，只保留原来的 `dry_run`；`tags` 等其它改动要手动从备份合并回去。
+- `slave.yaml` 是符号链接时拒绝执行。
+- 服务在运行时会重启。
 
 启用 TLS 时追加 `--tls-ca-file` / `--tls-server-name`（CA 文件会被复制到 `/etc/nut-server/ca.crt`）；客户端证书再加 `--tls-cert-file --tls-key-file`。内网无需 TLS 可用 `--disable-tls`。
 
 ## 在线安装
 
 ```bash
-sudo ./scripts/install-online.sh --role slave --version latest -- \
+sudo ./scripts/install-online.sh --role slave --version v0.6.0-rc.1 -- \
   --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-enroll-token
 ```
+
+v0.6.0 正式版发布前，`--version latest` 会装到 v0.5.1，它的安装脚本与本文档不一致，所以这里固定使用 `--version v0.6.0-rc.1`。
 
 不传 `--` 后面的参数时，`install-online.sh` 会优先尝试 `.deb` / `.rpm`；传了 role-script 参数则走 tar.gz 路径，方便预填配置。
 
 ## token 的生命周期
 
 1. **首次注册**：slave 用配置里的 `token`（master 的 enrollment token）注册。master 接受后在 `register_ack` 里返回为这个 `node_id` 签发的专属 token。
-2. **保存**：slave 先把专属 token 写进 `state_file`（0600），再回复 master `token_stored`，master 收到后才记下这个 token；写不进去就断开重连，不会使用一个可能丢失的 token。所以 `state_file` 必须可写（随包配置是 `/var/lib/nut-server/slave-state.json`）。
+2. **保存**：slave 先把专属 token 写进 `state_file`（0600），再回复 master `token_stored`，master 收到后才记下这个 token；写不进去时记错误日志、保持连接，继续用配置里的 `token`。所以 `state_file` 必须可写（随包配置是 `/var/lib/nut-server/slave-state.json`）。
+   `state_file` 无法解析时改名为 `<state_file>.corrupt-<UTC 时间>`、记错误日志，slave 以空状态启动并改用配置里的 `token`。
 3. **之后的注册**：`state_file` 里有专属 token 时优先用它，配置里的 `token` 不再使用。此后 enrollment token 不能再以这个 `node_id` 注册。
 4. **回退**：如果 master 以 `invalid token` 拒绝了存储的专属 token（被吊销，或 master 的 state 文件丢失），slave 清掉它，下次重连改用配置里的 `token` 重新注册。master 的 `enrollment` 为 `closed` 时这一步会被拒（`enrollment closed`），需要先在 master 上改回 `open`。
 
@@ -86,4 +102,4 @@ metrics_listen_addr: "127.0.0.1:9101"
 sudo ./scripts/upgrade-slave.sh
 ```
 
-只替换二进制和 systemd unit；`/etc/nut-server/slave.yaml` 和 `/var/lib/nut-server/` 都不会动。替换前会用新二进制以 `nut-server` 用户跑 `-check-config`，不通过就保留旧版本、不重启。升级到 v0.6.0 的顺序和注意事项见 [upgrade.md](upgrade.md)。
+只替换二进制、systemd unit 和 sudoers（`/etc/sudoers.d/nut-server-slave`）；`/etc/nut-server/slave.yaml` 和 `/var/lib/nut-server/` 都不会动。替换前会用新二进制以 `nut-server` 用户跑 `-check-config`，不通过就保留旧版本、不重启。用 `.deb` / `.rpm` 安装的机器要用 apt / dnf / yum 升级，升级脚本会拒绝执行。升级到 v0.6.0 的顺序和注意事项见 [upgrade.md](upgrade.md)。

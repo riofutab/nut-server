@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"nut-server/internal/atomicfile"
 	"nut-server/internal/protocol"
@@ -32,13 +33,27 @@ func (c *Client) loadState() {
 	}
 	var state persistedState
 	if err := json.Unmarshal(content, &state); err != nil {
-		slog.Error("decode slave state failed", "path", c.cfg.StateFile, "err", err)
+		c.moveCorruptState(err)
 		return
 	}
 	if state.Commands != nil {
 		c.commandStates = state.Commands
 	}
 	c.issuedToken = state.IssuedToken
+}
+
+// moveCorruptState renames an undecodable state file aside so the next persist
+// does not overwrite it: it may hold the issued token, which an operator can
+// then recover by hand instead of re-enrolling the node.
+func (c *Client) moveCorruptState(decodeErr error) {
+	movedTo := fmt.Sprintf("%s.corrupt-%s", c.cfg.StateFile, time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.Rename(c.cfg.StateFile, movedTo); err != nil {
+		slog.Error("slave state file is corrupt and could not be moved aside; starting with empty state",
+			"path", c.cfg.StateFile, "decode_err", decodeErr, "err", err)
+		return
+	}
+	slog.Error("slave state file is corrupt; moved it aside and starting with empty state, so a previously issued token is not used",
+		"path", c.cfg.StateFile, "moved_to", movedTo, "err", decodeErr)
 }
 
 // setIssuedToken stores (or with "" clears) the issued token and writes it to

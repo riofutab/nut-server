@@ -212,6 +212,51 @@ func TestEnrolledNodeTokenSurvivesMasterRestart(t *testing.T) {
 	}
 }
 
+func TestCorruptStateFileIsSetAsideInsteadOfOverwritten(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "master-state.json")
+	corrupt := []byte(`{"node_tokens":{"node-1":"abc"`)
+	if err := os.WriteFile(stateFile, corrupt, 0o600); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	server := NewServer(config.MasterConfig{StateFile: stateFile})
+
+	if server.isEnrolled("node-1") {
+		t.Fatal("a corrupt state file must load as empty state")
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("corrupt state file should be moved away, stat err=%v", err)
+	}
+	moved, err := filepath.Glob(stateFile + ".corrupt-*")
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("want one %s.corrupt-* file, got %v (err=%v)", stateFile, moved, err)
+	}
+	content, err := os.ReadFile(moved[0])
+	if err != nil {
+		t.Fatalf("read moved state file: %v", err)
+	}
+	if string(content) != string(corrupt) {
+		t.Fatalf("moved state file content=%q want %q", content, corrupt)
+	}
+}
+
+func TestMissingStateFileLoadsEmptyStateWithoutSideFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	server := NewServer(config.MasterConfig{StateFile: filepath.Join(dir, "master-state.json")})
+
+	if server.isEnrolled("node-1") {
+		t.Fatal("no node should be enrolled without a state file")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("loading must not create files, got %v", entries)
+	}
+}
+
 func TestEnrollmentDiscardsPendingTokenWhenConnectionDropsBeforeConfirm(t *testing.T) {
 	server := newEnrollmentServer(t, config.EnrollmentOpen)
 	addr := serveConns(t, server)
@@ -405,5 +450,107 @@ func TestSlaveThatIgnoresIssuedTokenStaysOnEnrollmentToken(t *testing.T) {
 	}
 	if !again.Accepted {
 		t.Fatalf("legacy slave should still register with the enrollment token, got %+v", again)
+	}
+}
+
+func newPipeClient(t *testing.T, nodeID string) (*Client, net.Conn) {
+	t.Helper()
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { _ = conn.Close(); _ = peer.Close() })
+	client := NewClient(conn)
+	client.NodeID = nodeID
+	return client, peer
+}
+
+func pipePeerClosed(t *testing.T, peer net.Conn) bool {
+	t.Helper()
+	_ = peer.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	_, err := peer.Read(make([]byte, 1))
+	netErr, ok := err.(net.Error)
+	return !ok || !netErr.Timeout()
+}
+
+func TestRegisterSucceedsWhenNodeTokenIsUnchangedSinceAuthentication(t *testing.T) {
+	server := newEnrollmentServer(t, config.EnrollmentOpen)
+	token := server.issueNodeToken("node-1")
+	_, authHash, err := server.authenticateNode("node-1", token)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	client, _ := newPipeClient(t, "node-1")
+
+	registered := server.registerIfTokenUnchanged(client, authHash)
+
+	if !registered {
+		t.Fatal("register should succeed when the token did not change")
+	}
+	if got, ok := server.registry.Get("node-1"); !ok || got != client {
+		t.Fatal("client should be in the registry")
+	}
+}
+
+func TestRegisterFailsWhenNodeTokenRotatedAfterAuthentication(t *testing.T) {
+	server := newEnrollmentServer(t, config.EnrollmentOpen)
+	token := server.issueNodeToken("node-1")
+	_, authHash, err := server.authenticateNode("node-1", token)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	server.issueNodeToken("node-1")
+	client, _ := newPipeClient(t, "node-1")
+
+	registered := server.registerIfTokenUnchanged(client, authHash)
+
+	if registered {
+		t.Fatal("register must fail after the token was rotated")
+	}
+	if _, ok := server.registry.Get("node-1"); ok {
+		t.Fatal("a connection authenticated with a stale token must not be registered")
+	}
+}
+
+func TestRegisterFailsWhenNodeTokenRevokedAfterAuthentication(t *testing.T) {
+	server := newEnrollmentServer(t, config.EnrollmentOpen)
+	token := server.issueNodeToken("node-1")
+	_, authHash, err := server.authenticateNode("node-1", token)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	server.removeNodeToken("node-1")
+	client, _ := newPipeClient(t, "node-1")
+
+	registered := server.registerIfTokenUnchanged(client, authHash)
+
+	if registered {
+		t.Fatal("register must fail after the token was revoked")
+	}
+	if _, ok := server.registry.Get("node-1"); ok {
+		t.Fatal("a connection authenticated with a revoked token must not be registered")
+	}
+}
+
+func TestPendingEnrollerCannotReplaceNodeEnrolledAfterItAuthenticated(t *testing.T) {
+	server := newEnrollmentServer(t, config.EnrollmentOpen)
+	issued, authHash, err := server.authenticateNode("node-1", testEnrollmentToken)
+	if err != nil || issued == "" {
+		t.Fatalf("authenticate enroller: issued=%q err=%v", issued, err)
+	}
+	enrolled, enrolledPeer := newPipeClient(t, "node-1")
+	if err := server.confirmIssuedToken("node-1", newNodeToken()); err != nil {
+		t.Fatalf("confirm other token: %v", err)
+	}
+	server.registry.Set(enrolled)
+	pending, _ := newPipeClient(t, "node-1")
+
+	registered := server.registerIfTokenUnchanged(pending, authHash)
+
+	if registered {
+		t.Fatal("a pending enroller must not register once the node has a token")
+	}
+	if got, ok := server.registry.Get("node-1"); !ok || got != enrolled {
+		t.Fatal("the enrolled connection must stay registered")
+	}
+	if pipePeerClosed(t, enrolledPeer) {
+		t.Fatal("the enrolled connection must not be closed")
 	}
 }

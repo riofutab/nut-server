@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 tls:
@@ -68,6 +70,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 tls:
@@ -90,6 +93,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 tls:
@@ -113,6 +117,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 `)
@@ -135,6 +140,7 @@ enrollment_tokens:
 log_ups_status: true
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 `)
@@ -156,6 +162,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 `)
@@ -167,11 +174,8 @@ shutdown_policies:
 	if cfg.LocalShutdown.Enabled {
 		t.Fatalf("expected local_shutdown.enabled to default to false")
 	}
-	if len(cfg.LocalShutdown.Command) != 3 {
-		t.Fatalf("expected default local shutdown command, got %v", cfg.LocalShutdown.Command)
-	}
-	if cfg.LocalShutdown.Command[0] != "/sbin/shutdown" || cfg.LocalShutdown.Command[1] != "-h" || cfg.LocalShutdown.Command[2] != "now" {
-		t.Fatalf("unexpected default local shutdown command: %v", cfg.LocalShutdown.Command)
+	if !reflect.DeepEqual(cfg.LocalShutdown.Command, sudoShutdownCommand) {
+		t.Fatalf("local_shutdown.command=%q want %q", cfg.LocalShutdown.Command, sudoShutdownCommand)
 	}
 	if cfg.LocalShutdown.MaxWait.Duration.String() != "15m0s" {
 		t.Fatalf("expected default local_shutdown.max_wait to be 15m, got %v", cfg.LocalShutdown.MaxWait.Duration)
@@ -196,6 +200,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 local_shutdown:
@@ -213,6 +218,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 local_shutdown:
@@ -230,6 +236,7 @@ enrollment_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+  community: "public"
 shutdown_policies:
   - name: on-battery
 local_shutdown:
@@ -317,6 +324,7 @@ admin_token: "admin-secret"
 enrollment_tokens: ["secret-token"]
 snmp:
   target: "127.0.0.1"
+  community: "public"
   comunity: "public"
 ` + defaultPolicy,
 			wantKey: "comunity",
@@ -401,6 +409,7 @@ admin_token: "admin-secret"
 enrollment_tokens: ["secret-token"]
 snmp:
   target: "127.0.0.1"
+  community: "public"
   output_source_oid: ".1.3.6.1.2.1.33.1.4.1.0"
 ` + defaultPolicy,
 			wantKey: "snmp.output_source_oid",
@@ -412,6 +421,7 @@ admin_token: "admin-secret"
 enrollment_tokens: ["secret-token"]
 snmp:
   target: "127.0.0.1"
+  community: "public"
   charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
 ` + defaultPolicy,
 			wantKey: "snmp.charge_oid",
@@ -423,6 +433,7 @@ admin_token: "admin-secret"
 enrollment_tokens: ["secret-token"]
 snmp:
   target: "127.0.0.1"
+  community: "public"
   runtime_minutes_oid: ".1.3.6.1.2.1.33.1.2.3.0"
 ` + defaultPolicy,
 			wantKey: "snmp.runtime_minutes_oid",
@@ -557,6 +568,52 @@ func TestExampleConfigsLoadWithPlaceholdersReplaced(t *testing.T) {
 
 			if err != nil {
 				t.Fatalf("example config %s does not load: %v", tc.file, err)
+			}
+		})
+	}
+}
+
+// sudoShutdownCommand is the argv the shipped sudoers files allow.
+var sudoShutdownCommand = []string{"/usr/bin/sudo", "-n", "/sbin/shutdown", "-h", "now"}
+
+const minimalSlaveFields = `
+node_id: "slave-01"
+master_addr: "127.0.0.1:9000"
+token: "secret-token"
+`
+
+func TestLoadSlaveConfigDefaultsShutdownCommandToSudo(t *testing.T) {
+	path := writeConfigFile(t, minimalSlaveFields)
+
+	cfg, err := LoadSlaveConfig(path)
+
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.ShutdownCommand, sudoShutdownCommand) {
+		t.Fatalf("shutdown_command=%q want %q", cfg.ShutdownCommand, sudoShutdownCommand)
+	}
+}
+
+func TestLoadSlaveConfigRejectsExplicitlyEmptyShutdownCommand(t *testing.T) {
+	path := writeConfigFile(t, minimalSlaveFields+"shutdown_command: []\n")
+
+	_, err := LoadSlaveConfig(path)
+
+	if err == nil || !strings.Contains(err.Error(), "shutdown_command must not be empty") {
+		t.Fatalf("expected empty shutdown_command to fail, got %v", err)
+	}
+}
+
+func TestLoadMasterConfigRejectsNonPositiveIntervals(t *testing.T) {
+	for _, key := range []string{"poll_interval", "offline_after", "command_timeout"} {
+		t.Run(key, func(t *testing.T) {
+			path := writeConfigFile(t, minimalMasterFields+defaultPolicy+key+": \"-1s\"\n")
+
+			_, err := LoadMasterConfig(path)
+
+			if err == nil || !strings.Contains(err.Error(), key+" must be greater than zero") {
+				t.Fatalf("expected negative %s to fail, got %v", key, err)
 			}
 		})
 	}

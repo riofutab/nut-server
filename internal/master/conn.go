@@ -55,7 +55,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	// issuedToken is set when this connection enrolls the node. It becomes the
 	// node's token only when the slave reports token_stored; if the connection
 	// drops first, or the slave predates per-node tokens, it is discarded.
-	issuedToken, err := s.authenticateNode(register.NodeID, register.Token)
+	issuedToken, tokenHash, err := s.authenticateNode(register.NodeID, register.Token)
 	if err != nil {
 		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: err.Error()})
 		slog.Warn("reject slave", "node_id", register.NodeID, "peer", conn.RemoteAddr().String(), "reason", err)
@@ -74,7 +74,12 @@ func (s *Server) handleConn(conn net.Conn) {
 	client.Hostname = register.Hostname
 	client.Tags = register.Tags
 	client.Touch()
-	s.registry.Set(client)
+	if !s.registerIfTokenUnchanged(client, tokenHash) {
+		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: errInvalidToken.Error()})
+		slog.Warn("reject slave: node token changed during registration", "node_id", register.NodeID, "peer", conn.RemoteAddr().String())
+		recordRegisterAttempt("rejected")
+		return
+	}
 	s.directory.Observe(register.NodeID, register.Hostname, register.Tags, time.Now().UTC())
 	s.directory.SetSlaveInfo(register.NodeID, register.DryRun, register.ShutdownReady)
 	if register.ShutdownReady != nil && !*register.ShutdownReady {
