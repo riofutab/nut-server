@@ -49,6 +49,8 @@ nut-slave installed.
   works without root.
 
   Edit /etc/nut-server/slave.yaml (master_addr, node_id, token).
-  Then: sudo systemctl enable --now nut-slave
+  Check it as the service user, then start:
+    sudo -u nut-server /usr/local/bin/nut-slave -check-config -config /etc/nut-server/slave.yaml
+    sudo systemctl enable --now nut-slave
 
 EOF

@@ -43,6 +43,9 @@ type RegisterMessage struct {
 type RegisterAckMessage struct {
 	Accepted bool   `json:"accepted"`
 	Message  string `json:"message,omitempty"`
+	// IssuedToken is set when the master issued this node its own token; the
+	// slave must store it and register with it from then on.
+	IssuedToken string `json:"issued_token,omitempty"`
 }
 
 type PingMessage struct {
@@ -108,17 +111,19 @@ type CommandSummary struct {
 }
 
 type NodeStatus struct {
-	NodeID        string              `json:"node_id"`
-	Hostname      string              `json:"hostname"`
-	Tags          []string            `json:"tags,omitempty"`
-	State         string              `json:"state"`
-	Expected      bool                `json:"expected,omitempty"`
-	DryRun        bool                `json:"dry_run,omitempty"`
-	ShutdownReady *bool               `json:"shutdown_ready,omitempty"`
-	Connected     bool                `json:"connected"`
-	FirstSeen     *time.Time          `json:"first_seen,omitempty"`
-	LastSeen      *time.Time          `json:"last_seen,omitempty"`
-	LastShutdown  *ShutdownAckMessage `json:"last_shutdown,omitempty"`
+	NodeID        string   `json:"node_id"`
+	Hostname      string   `json:"hostname"`
+	Tags          []string `json:"tags,omitempty"`
+	State         string   `json:"state"`
+	Expected      bool     `json:"expected,omitempty"`
+	DryRun        bool     `json:"dry_run,omitempty"`
+	ShutdownReady *bool    `json:"shutdown_ready,omitempty"`
+	// Enrolled reports whether the master holds an issued token for the node.
+	Enrolled     bool                `json:"enrolled"`
+	Connected    bool                `json:"connected"`
+	FirstSeen    *time.Time          `json:"first_seen,omitempty"`
+	LastSeen     *time.Time          `json:"last_seen,omitempty"`
+	LastShutdown *ShutdownAckMessage `json:"last_shutdown,omitempty"`
 }
 
 const (
@@ -151,6 +156,7 @@ const (
 	LocalShutdownTriggerRemoteComplete   = "remote_complete"
 	LocalShutdownTriggerWaitExpired      = "wait_expired"
 	LocalShutdownTriggerEmergencyRuntime = "emergency_runtime"
+	LocalShutdownTriggerUPSUnreachable   = "ups_unreachable"
 )
 
 type LocalShutdownStatus struct {

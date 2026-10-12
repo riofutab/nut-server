@@ -21,6 +21,10 @@ type autoEpisode struct {
 	StartedAt     time.Time `json:"started_at"`
 	CommandID     string    `json:"command_id,omitempty"`
 	FiredPolicies []string  `json:"fired_policies,omitempty"`
+	// matchSince records when each debounced policy started matching. It is
+	// not persisted: after a restart the timers start over, which delays a
+	// shutdown rather than firing one on readings taken before the restart.
+	matchSince map[string]time.Time
 }
 
 func (e *autoEpisode) status() *protocol.EpisodeStatus {
@@ -86,6 +90,61 @@ func (s *Server) endEpisodeOnLinePower() {
 	s.persistState(seq, content)
 	if ended {
 		slog.Info("line power restored, shutdown episode ended")
+	}
+}
+
+// evaluateEpisodePolicies decides which policies fire at this poll. reading is
+// nil when the poll failed: debounce timers are kept but nothing fires on stale
+// data, except ups_unreachable_for policies, which are about that silence.
+func (s *Server) evaluateEpisodePolicies(reading *UPSStatus, now time.Time) {
+	var silentFor time.Duration
+	if reading == nil {
+		var silent bool
+		if silentFor, silent = s.upsSilentFor(now); !silent {
+			return
+		}
+	}
+
+	s.commandMu.Lock()
+	episode := s.episode
+	if episode == nil {
+		s.commandMu.Unlock()
+		return
+	}
+	if episode.matchSince == nil {
+		episode.matchSince = make(map[string]time.Time)
+	}
+	var due []string
+	for _, p := range s.cfg.ShutdownPolicies {
+		if slices.Contains(episode.FiredPolicies, p.Name) {
+			continue
+		}
+		if unreachableFor := p.When.UPSUnreachableFor.Duration; unreachableFor > 0 {
+			if reading == nil && silentFor >= unreachableFor {
+				due = append(due, p.Name)
+			}
+			continue
+		}
+		if reading == nil {
+			continue
+		}
+		if !policyMatches(*reading, p.When) {
+			delete(episode.matchSince, p.Name)
+			continue
+		}
+		since, matching := episode.matchSince[p.Name]
+		if !matching {
+			since = now
+			episode.matchSince[p.Name] = now
+		}
+		if now.Sub(since) >= p.Duration.Duration {
+			due = append(due, p.Name)
+		}
+	}
+	s.commandMu.Unlock()
+
+	if len(due) > 0 {
+		s.applyPolicyMatch(buildPolicyMatch(s.cfg.ShutdownPolicies, due), now)
 	}
 }
 

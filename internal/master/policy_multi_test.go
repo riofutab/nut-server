@@ -9,12 +9,25 @@ import (
 
 func boolPtr(b bool) *bool { return &b }
 
+// evaluatePolicies applies one reading to every policy, ignoring debounce.
+func evaluatePolicies(status UPSStatus, policies []config.ShutdownPolicySpec) (PolicyMatch, bool) {
+	var names []string
+	for _, p := range policies {
+		if policyMatches(status, p.When) {
+			names = append(names, p.Name)
+		}
+	}
+	if len(names) == 0 {
+		return PolicyMatch{}, false
+	}
+	return buildPolicyMatch(policies, names), true
+}
+
 func TestEvaluatePoliciesSingleANDCondition(t *testing.T) {
 	policies := []config.ShutdownPolicySpec{
 		{
 			Name: "charge+runtime",
 			When: config.ShutdownPolicyWhen{
-				OnBattery:    boolPtr(true),
 				ChargeBelow:  30,
 				RuntimeBelow: 15,
 			},
@@ -29,7 +42,6 @@ func TestEvaluatePoliciesSingleANDCondition(t *testing.T) {
 		trigger bool
 	}{
 		{"all conditions met", UPSStatus{OnBattery: true, BatteryCharge: 25, RuntimeMinutes: 10}, true},
-		{"not on battery", UPSStatus{OnBattery: false, BatteryCharge: 25, RuntimeMinutes: 10}, false},
 		{"charge above", UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 10}, false},
 		{"runtime above", UPSStatus{OnBattery: true, BatteryCharge: 25, RuntimeMinutes: 20}, false},
 		{"boundary equal triggers", UPSStatus{OnBattery: true, BatteryCharge: 30, RuntimeMinutes: 15}, true},
@@ -37,37 +49,9 @@ func TestEvaluatePoliciesSingleANDCondition(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, ok := EvaluatePolicies(tc.status, policies)
+			_, ok := evaluatePolicies(tc.status, policies)
 			if ok != tc.trigger {
 				t.Fatalf("trigger=%v want %v", ok, tc.trigger)
-			}
-		})
-	}
-}
-
-func TestEvaluatePoliciesOnBatterySymmetric(t *testing.T) {
-	cases := []struct {
-		name      string
-		want      *bool
-		status    UPSStatus
-		triggered bool
-	}{
-		{"nil ignores battery state on=true", nil, UPSStatus{OnBattery: true, BatteryCharge: 10}, true},
-		{"nil ignores battery state on=false", nil, UPSStatus{OnBattery: false, BatteryCharge: 10}, true},
-		{"require on_battery=true matches", boolPtr(true), UPSStatus{OnBattery: true, BatteryCharge: 10}, true},
-		{"require on_battery=true rejects line power", boolPtr(true), UPSStatus{OnBattery: false, BatteryCharge: 10}, false},
-		{"require on_battery=false matches line power", boolPtr(false), UPSStatus{OnBattery: false, BatteryCharge: 10}, true},
-		{"require on_battery=false rejects battery", boolPtr(false), UPSStatus{OnBattery: true, BatteryCharge: 10}, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			policies := []config.ShutdownPolicySpec{{
-				Name: "x", When: config.ShutdownPolicyWhen{OnBattery: tc.want, ChargeBelow: 20},
-				Target: config.ShutdownPolicyTarget{All: true},
-			}}
-			_, ok := EvaluatePolicies(tc.status, policies)
-			if ok != tc.triggered {
-				t.Fatalf("triggered=%v want %v", ok, tc.triggered)
 			}
 		})
 	}
@@ -90,7 +74,7 @@ func TestEvaluatePoliciesMultiOR(t *testing.T) {
 	}
 
 	t.Run("only dev fires", func(t *testing.T) {
-		match, ok := EvaluatePolicies(UPSStatus{BatteryCharge: 40}, policies)
+		match, ok := evaluatePolicies(UPSStatus{BatteryCharge: 40}, policies)
 		if !ok || len(match.Names) != 1 || match.Names[0] != "dev-early" {
 			t.Fatalf("names=%v ok=%v", match.Names, ok)
 		}
@@ -103,7 +87,7 @@ func TestEvaluatePoliciesMultiOR(t *testing.T) {
 	})
 
 	t.Run("both fire union to all", func(t *testing.T) {
-		match, ok := EvaluatePolicies(UPSStatus{BatteryCharge: 10}, policies)
+		match, ok := evaluatePolicies(UPSStatus{BatteryCharge: 10}, policies)
 		if !ok {
 			t.Fatal("should trigger")
 		}
@@ -129,7 +113,7 @@ func TestEvaluatePoliciesTargetUnionByTagsAndNodeIDs(t *testing.T) {
 			Target: config.ShutdownPolicyTarget{Tags: []string{"db", "web"}, NodeIDs: []string{"cache-01"}},
 		},
 	}
-	match, ok := EvaluatePolicies(UPSStatus{BatteryCharge: 40}, policies)
+	match, ok := evaluatePolicies(UPSStatus{BatteryCharge: 40}, policies)
 	if !ok {
 		t.Fatal("should trigger")
 	}
@@ -149,7 +133,7 @@ func TestEvaluatePoliciesReasonJoinsMatches(t *testing.T) {
 		{Name: "a", When: config.ShutdownPolicyWhen{ChargeBelow: 50}, Reason: "alpha"},
 		{Name: "b", When: config.ShutdownPolicyWhen{ChargeBelow: 50}, Reason: "beta"},
 	}
-	match, ok := EvaluatePolicies(UPSStatus{BatteryCharge: 10}, policies)
+	match, ok := evaluatePolicies(UPSStatus{BatteryCharge: 10}, policies)
 	if !ok {
 		t.Fatal("should trigger")
 	}
@@ -162,7 +146,7 @@ func TestEvaluatePoliciesNoMatchReturnsFalse(t *testing.T) {
 	policies := []config.ShutdownPolicySpec{
 		{Name: "a", When: config.ShutdownPolicyWhen{ChargeBelow: 10}, Target: config.ShutdownPolicyTarget{All: true}},
 	}
-	if _, ok := EvaluatePolicies(UPSStatus{BatteryCharge: 50}, policies); ok {
+	if _, ok := evaluatePolicies(UPSStatus{BatteryCharge: 50}, policies); ok {
 		t.Fatal("should not trigger")
 	}
 }

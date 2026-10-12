@@ -30,6 +30,20 @@ func (s *Server) emergencyRuntimeReached(upsStatus *UPSStatus) bool {
 	return upsStatus != nil && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes
 }
 
+// emergencyTrigger returns why the master must power off right away, or "".
+// Callers only act on it during an episode, so a silent UPS on line power never
+// powers off the master.
+func (s *Server) emergencyTrigger(upsStatus *UPSStatus, now time.Time) string {
+	if s.emergencyRuntimeReached(upsStatus) {
+		return protocol.LocalShutdownTriggerEmergencyRuntime
+	}
+	unreachableAfter := s.cfg.LocalShutdown.UnreachableAfter.Duration
+	if silentFor, silent := s.upsSilentFor(now); silent && unreachableAfter > 0 && silentFor >= unreachableAfter {
+		return protocol.LocalShutdownTriggerUPSUnreachable
+	}
+	return ""
+}
+
 func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 	if !s.cfg.LocalShutdown.Enabled {
 		return
@@ -42,14 +56,16 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 		replayNodes map[string]struct{}
 		dirty       bool
 	)
+	emergency := s.emergencyTrigger(upsStatus, now)
 
 	s.commandMu.Lock()
 	state := s.localShutdown
 	if state == nil {
 		// Emergency is a safety net independent of any "all" command: during an
-		// episode the master powers itself off at critical runtime even when no
-		// policy targets every node (or none has fired yet).
-		if s.episode == nil || !s.upsConfirmed.Load() || !s.emergencyRuntimeReached(upsStatus) {
+		// episode the master powers itself off at critical runtime or when the
+		// UPS stops answering, even when no policy targets every node (or none
+		// has fired yet).
+		if s.episode == nil || !s.upsConfirmed.Load() || emergency == "" {
 			s.commandMu.Unlock()
 			return
 		}
@@ -59,7 +75,7 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 			Phase:     protocol.LocalShutdownPhaseEmergency,
 			CommandID: s.episode.CommandID,
 			StartedAt: &rebroadcastAt,
-			Trigger:   protocol.LocalShutdownTriggerEmergencyRuntime,
+			Trigger:   emergency,
 			DryRun:    s.cfg.DryRun,
 		}
 		if hasCommand {
@@ -102,10 +118,10 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 				commandID = state.CommandID
 				trigger = state.Trigger
 				dirty = true
-			case s.emergencyRuntimeReached(upsStatus):
+			case emergency != "":
 				rebroadcastAt := now
 				state.Phase = protocol.LocalShutdownPhaseEmergency
-				state.Trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+				state.Trigger = emergency
 				state.LastRebroadcastAt = &rebroadcastAt
 				commandID = state.CommandID
 				trigger = state.Trigger
@@ -124,7 +140,7 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 			trigger = protocol.LocalShutdownTriggerWaitExpired
 		case protocol.LocalShutdownPhaseEmergency:
 			commandID = state.CommandID
-			trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+			trigger = state.Trigger
 		case protocol.LocalShutdownPhaseFailed:
 			if state.LastAttemptAt == nil || now.Sub(*state.LastAttemptAt) >= shutdownRetryInterval {
 				commandID = state.CommandID

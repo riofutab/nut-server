@@ -52,7 +52,8 @@ type runningMaster struct {
 	adminURL   string
 	listenAddr string
 	adminToken string
-	authToken  string
+	// enrollmentToken is what new slaves register with (enrollment_tokens[0]).
+	enrollmentToken string
 }
 
 func newMasterConfig(t *testing.T) config.MasterConfig {
@@ -60,23 +61,17 @@ func newMasterConfig(t *testing.T) config.MasterConfig {
 	tmp := t.TempDir()
 	listenPort := freeTCPPort(t)
 	adminPort := freeTCPPort(t)
-	return config.MasterConfig{
-		ListenAddr:      fmt.Sprintf("127.0.0.1:%d", listenPort),
-		AdminListenAddr: fmt.Sprintf("127.0.0.1:%d", adminPort),
-		AdminToken:      "e2e-admin-token",
-		StateFile:       filepath.Join(tmp, "master-state.json"),
-		AuthTokens:      []string{"e2e-auth-token"},
-		PollInterval:    config.Duration{Duration: 250 * time.Millisecond},
-		CommandTimeout:  config.Duration{Duration: 2 * time.Second},
-		OfflineAfter:    config.Duration{Duration: 1 * time.Second},
-		DryRun:          true,
-		LogUPSStatus:    false,
-		ShutdownPolicy: config.ShutdownPolicy{
-			RequireOnBattery:  true,
-			MinBatteryCharge:  30,
-			MinRuntimeMinutes: 15,
-			ShutdownReason:    "e2e",
-		},
+	cfg := config.MasterConfig{
+		ListenAddr:       fmt.Sprintf("127.0.0.1:%d", listenPort),
+		AdminListenAddr:  fmt.Sprintf("127.0.0.1:%d", adminPort),
+		AdminToken:       "e2e-admin-token",
+		StateFile:        filepath.Join(tmp, "master-state.json"),
+		EnrollmentTokens: []string{"e2e-auth-token"},
+		PollInterval:     config.Duration{Duration: 250 * time.Millisecond},
+		CommandTimeout:   config.Duration{Duration: 2 * time.Second},
+		OfflineAfter:     config.Duration{Duration: 1 * time.Second},
+		DryRun:           true,
+		LogUPSStatus:     false,
 		SNMP: config.SNMPConfig{
 			Target:         "127.0.0.1",
 			Port:           161,
@@ -85,6 +80,10 @@ func newMasterConfig(t *testing.T) config.MasterConfig {
 			TimeoutSeconds: 1,
 		},
 	}
+	if err := config.ResolveSNMPVars(&cfg.SNMP); err != nil {
+		t.Fatalf("resolve snmp vars: %v", err)
+	}
+	return cfg
 }
 
 func startMaster(t *testing.T, cfg config.MasterConfig) *runningMaster {
@@ -108,7 +107,8 @@ func startMaster(t *testing.T, cfg config.MasterConfig) *runningMaster {
 		adminURL:   fmt.Sprintf("http://%s", cfg.AdminListenAddr),
 		listenAddr: fmt.Sprintf("%s://%s", scheme, cfg.ListenAddr),
 		adminToken: cfg.AdminToken,
-		authToken:  cfg.AuthTokens[0],
+
+		enrollmentToken: cfg.EnrollmentTokens[0],
 	}
 	t.Cleanup(rm.Stop)
 	rm.waitAdminReady(t)
@@ -164,6 +164,27 @@ func (rm *runningMaster) Status(t *testing.T) protocol.StatusResponse {
 	return status
 }
 
+// AdminDo sends an admin API request with the admin bearer token and returns
+// the status code and body.
+func (rm *runningMaster) AdminDo(t *testing.T, method, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, rm.adminURL+path, nil)
+	if err != nil {
+		t.Fatalf("build %s %s: %v", method, path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+rm.adminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s %s body: %v", method, path, err)
+	}
+	return resp.StatusCode, string(body)
+}
+
 func (rm *runningMaster) TriggerShutdown(t *testing.T, body protocol.ShutdownRequest) {
 	t.Helper()
 	payload, err := json.Marshal(body)
@@ -216,7 +237,7 @@ func newSlaveConfig(t *testing.T, masterCfg config.MasterConfig, nodeID string) 
 	return config.SlaveConfig{
 		NodeID:            nodeID,
 		MasterAddr:        masterCfg.ListenAddr,
-		Token:             masterCfg.AuthTokens[0],
+		Token:             masterCfg.EnrollmentTokens[0],
 		StateFile:         filepath.Join(tmp, nodeID+"-state.json"),
 		ReconnectInterval: config.Duration{Duration: 100 * time.Millisecond},
 		DryRun:            true,

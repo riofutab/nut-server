@@ -25,7 +25,7 @@ func TestLoadMasterConfigWithTLS(t *testing.T) {
 	content := strings.Join([]string{
 		"listen_addr: \"127.0.0.1:9000\"",
 		"admin_token: \"admin-secret\"",
-		"auth_tokens:",
+		"enrollment_tokens:",
 		"  - \"token-1\"",
 		"tls:",
 		"  enabled: true",
@@ -35,8 +35,8 @@ func TestLoadMasterConfigWithTLS(t *testing.T) {
 		"  require_client_cert: true",
 		"snmp:",
 		"  target: \"192.168.1.10\"",
-		"shutdown_policy:",
-		"  min_battery_charge: 30",
+		"shutdown_policies:",
+		"  - name: on-battery",
 	}, "\n") + "\n"
 	if err := os.WriteFile(configFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -70,20 +70,22 @@ func TestLoadMasterConfigRejectsIncompleteTLS(t *testing.T) {
 
 	content := strings.Join([]string{
 		"admin_token: \"admin-secret\"",
-		"auth_tokens:",
+		"enrollment_tokens:",
 		"  - \"token-1\"",
 		"tls:",
 		"  enabled: true",
 		"  cert_file: '" + filepath.ToSlash(certFile) + "'",
 		"snmp:",
 		"  target: \"192.168.1.10\"",
+		"shutdown_policies:",
+		"  - name: on-battery",
 	}, "\n") + "\n"
 	if err := os.WriteFile(configFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if _, err := LoadMasterConfig(configFile); err == nil {
-		t.Fatalf("expected master TLS validation error")
+	if _, err := LoadMasterConfig(configFile); err == nil || !strings.Contains(err.Error(), "tls.key_file") {
+		t.Fatalf("expected master TLS validation error, got %v", err)
 	}
 }
 
@@ -386,8 +388,8 @@ func generateSignedCertificate(t *testing.T, caCertPEM []byte, caKey *rsa.Privat
 
 func TestLoadMasterConfigRejectsBindNodeIDWithoutClientCert(t *testing.T) {
 	path := writeConfigFile(t, minimalMasterFields+`
-shutdown_policy:
-  require_on_battery: true
+shutdown_policies:
+  - name: on-battery
 tls:
   bind_node_id_to_cert: true
 `)

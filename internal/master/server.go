@@ -64,6 +64,11 @@ type Server struct {
 	// after Run returns.
 	connsMu sync.Mutex
 	conns   map[net.Conn]struct{}
+	// Per-node token hashes (node_id -> hex SHA-256), persisted in the state
+	// file. Lock order: commandMu before tokensMu.
+	tokensMu         sync.Mutex
+	nodeTokens       map[string]string
+	enrollmentHashes []string
 }
 
 type shutdownCommandState struct {
@@ -100,6 +105,9 @@ func NewServer(cfg config.MasterConfig) *Server {
 		directory: NewNodeDirectory(),
 		commands:  make(map[string]*shutdownCommandState),
 		conns:     make(map[net.Conn]struct{}),
+
+		nodeTokens:       make(map[string]string),
+		enrollmentHashes: hashTokens(cfg.EnrollmentTokens),
 	}
 	server.localShutdownRunner = server.runLocalShutdownCommand
 	server.upsReader = ReadUPSStatus
@@ -129,6 +137,12 @@ func (s *Server) listen() (net.Listener, error) {
 
 func (s *Server) Run(ctx context.Context) error {
 	s.runLocalShutdownSelfCheck(ctx)
+	adminTLS, err := loadAdminTLSConfig(s.cfg.AdminTLS)
+	if err != nil {
+		return err
+	}
+	warnPlaintextAdmin(s.cfg.AdminListenAddr, adminTLS)
+
 	listener, err := s.listen()
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.cfg.ListenAddr, err)
@@ -150,7 +164,7 @@ func (s *Server) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); s.runPollingLoop(ctx) }()
-	go func() { defer wg.Done(); s.runAdminServer(ctx) }()
+	go func() { defer wg.Done(); s.runAdminServer(ctx, adminTLS) }()
 	go func() { defer wg.Done(); s.runCommandWatcher(ctx) }()
 
 	var connWG sync.WaitGroup

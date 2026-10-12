@@ -6,9 +6,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 require_root
 secure_install_layout /etc/nut-server/slave.yaml
-install_binary_from_package nut-slave
-install_service_from_package nut-slave.service
 install_sudoers_from_package nut-server-slave
+install_binary_from_package nut-slave /etc/nut-server/slave.yaml
+install_service_from_package nut-slave.service
 reload_systemd
 restart_if_active nut-slave
 

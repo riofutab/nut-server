@@ -1,14 +1,24 @@
 listen_addr: ":9000"
-# admin_listen_addr 同时承载状态页、admin API 和 /metrics(/metrics 不鉴权,仅靠绑定回环保护)
+# admin_listen_addr 同时承载状态页、admin API 和 /metrics(/metrics 不鉴权,仅靠绑定回环保护)。
+# 绑非回环地址时应配置 admin_tls,否则启动时打 WARN。
 admin_listen_addr: "127.0.0.1:9001"
 admin_token: "replace-with-strong-admin-token"
-# public_addr: slave 从 /install/slave 收到的 master_addr。留空时回退到请求的 Host header + listen_addr 端口。
+# admin_tls: 给 admin 端口开 HTTPS(最低 TLS 1.2)。两项都留空则为明文 HTTP。
+admin_tls:
+  cert_file: ""
+  key_file: ""
+# public_addr: 装机脚本里写给 slave 的 master_addr;master 开了 TLS 时其主机名也作为 TLS server name。
+# 留空时回退到请求的 Host header + listen_addr 端口。
 public_addr: ""
-# install_repo: /install/slave 用来拉取 install-online.sh 的 GitHub 仓库。留空使用默认上游。
+# install_repo: 装机脚本用来拉取 install-online.sh 的 GitHub 仓库。留空使用默认上游。
 install_repo: ""
 state_file: "data/master-state.json"
-auth_tokens:
+# enrollment_tokens: 只用于节点首次注册。注册成功后 master 给该 node_id 签发专属 token,
+# 之后这个 node_id 只能用专属 token 注册。
+enrollment_tokens:
   - "replace-with-strong-token"
+# enrollment: open | closed。全部节点注册完成后改成 closed,新 node_id 将无法注册。
+enrollment: open
 poll_interval: "10s"
 command_timeout: "30s"
 offline_after: "45s"
@@ -21,33 +31,36 @@ tls:
   key_file: ""
   ca_file: ""
   require_client_cert: false
-shutdown_policy:
-  require_on_battery: true
-  min_battery_charge: 30
-  min_runtime_minutes: 15
-  shutdown_reason: "UPS battery threshold reached"
-# shutdown_policies: 多策略组合。任一 policy 命中即触发;命中多条时 target 取并集
-# (任一 all:true 则关全部;否则 tags / node_ids 并集)。reason 拼接成 'a; b'。
-# 留空时自动用上面的 shutdown_policy 合成一条 'default' policy,旧配置无需改动。
-# 策略只在 UPS 走电池时评估。同一次断电里,后命中的策略并入同一条命令,
-# 下面的例子会先关 dev 节点,续航低于 5 分钟时再关全部。
-# when.on_battery 只能写 true,写 false 会启动失败。
-# shutdown_policies:
-#   - name: dev-early
-#     when:
-#       charge_below: 50
-#     target:
-#       tags: [dev]
-#     reason: "dev nodes shed early"
-#   - name: critical-all
-#     when:
-#       on_battery: true
-#       runtime_below: 5
-#     target:
-#       all: true
-#     reason: "runtime critical"
-# local_shutdown: 只有目标为全部节点的命令会触发 master 本机关机;断电期间
-# 续航低于 emergency_runtime_minutes 时无论如何都会关。市电恢复会取消尚未开始的本机关机。
+# shutdown_policies: 至少一条。策略只在 UPS 走电池时评估,when 为空表示「一走电池就触发」。
+# when 内各条件是 AND;任一 policy 命中即触发,命中多条时 target 取并集
+# (任一 all:true 则关全部;否则 tags / node_ids 并集),reason 拼接成 'a; b'。
+# 同一次断电里,后命中的策略并入同一条命令:下面的例子先关 dev 节点,续航低于 5 分钟时再关全部。
+# duration: 条件需连续满足这么久才触发(默认 0,立即触发);轮询失败不清零也不触发。
+# when.ups_unreachable_for: 断电期间 UPS 连续这么久没有应答就触发;只能单独使用,不能与其他条件或 duration 组合。
+shutdown_policies:
+  - name: dev-early
+    when:
+      charge_below: 50
+    duration: "30s"
+    target:
+      tags: [dev]
+    reason: "dev nodes shed early"
+  - name: critical-all
+    when:
+      runtime_below: 5
+    duration: "30s"
+    target:
+      all: true
+    reason: "runtime critical"
+  # - name: ups-lost
+  #   when:
+  #     ups_unreachable_for: "3m"
+  #   target:
+  #     all: true
+  #   reason: "UPS unreachable on battery"
+# local_shutdown: 只有目标为全部节点的命令会触发 master 本机关机;断电期间续航低于
+# emergency_runtime_minutes,或 UPS 连续 unreachable_after 没有应答时,无论如何都会关。
+# 市电恢复会取消尚未开始的本机关机。
 local_shutdown:
   enabled: false
   # master 以非 root 的 nut-server 用户运行,需经 sudo 关机(包内随附
@@ -61,15 +74,27 @@ local_shutdown:
   # 关机命令最长执行时间,超时则杀掉并记为 failed(默认 2m)。自定义脚本更久就调大。
   command_timeout: "2m"
   max_wait: "15m"
-  # 紧急阈值应低于 shutdown_policy.min_runtime_minutes(默认 15),否则刚进入
-  # 等待远端阶段就会立即自关,失去"最后关 master"的意义。
-  emergency_runtime_minutes: 5
+  # 紧急阈值应低于各策略的 runtime_below,否则刚进入等待远端阶段就会立即自关,
+  # 失去「最后关 master」的意义。
+  emergency_runtime_minutes: 3
+  # 断电期间 UPS 失联多久后按紧急处理(默认等于 max_wait)。
+  unreachable_after: "15m"
 snmp:
   target: "192.168.1.10"
   port: 161
-  community: "public"
   version: "2c"
   timeout_seconds: 2
-  output_source_oid: ".1.3.6.1.2.1.33.1.4.1.0"
-  charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
-  runtime_minutes_oid: ".1.3.6.1.2.1.33.1.2.3.0"
+  community: "public"
+  # profile: ups-mib(默认,RFC 1628) | apc | cyberpower | eaton
+  profile: ups-mib
+  # 可选:覆盖 profile 中的单项。runtime.unit 取 minutes | seconds | timeticks(1/100 秒)。
+  # on_battery: { oid: ".1.3.6.1.2.1.33.1.4.1.0", values: [5] }
+  # charge: { oid: ".1.3.6.1.2.1.33.1.2.4.0" }
+  # runtime: { oid: ".1.3.6.1.2.1.33.1.2.3.0", unit: minutes }
+  # SNMPv3:version 改为 "3",不再使用 community。
+  # username: "nut"
+  # security_level: authPriv   # noAuthNoPriv | authNoPriv | authPriv
+  # auth_protocol: SHA256
+  # auth_passphrase: "replace-with-auth-passphrase"
+  # priv_protocol: AES
+  # priv_passphrase: "replace-with-priv-passphrase"

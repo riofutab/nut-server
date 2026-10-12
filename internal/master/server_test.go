@@ -1077,7 +1077,7 @@ func TestHandleConnDisconnectsIdleHandshake(t *testing.T) {
 	}
 	defer listener.Close()
 
-	server := NewServer(config.MasterConfig{AuthTokens: []string{"t"}})
+	server := NewServer(config.MasterConfig{EnrollmentTokens: []string{"t"}})
 
 	done := make(chan struct{})
 	go func() {
@@ -1104,9 +1104,9 @@ func TestHandleConnDisconnectsIdleHandshake(t *testing.T) {
 
 func TestStatusComputesNodeStateFromDirectory(t *testing.T) {
 	server := NewServer(config.MasterConfig{
-		AuthTokens:   []string{"t"},
-		AdminToken:   "a",
-		OfflineAfter: config.Duration{Duration: 30 * time.Second},
+		EnrollmentTokens: []string{"t"},
+		AdminToken:       "a",
+		OfflineAfter:     config.Duration{Duration: 30 * time.Second},
 	})
 
 	now := time.Now().UTC()
@@ -1254,11 +1254,11 @@ func TestRunReturnsCleanlyWhenContextCancelled(t *testing.T) {
 	httpListener.Close()
 
 	server := NewServer(config.MasterConfig{
-		ListenAddr:      tcpAddr,
-		AdminListenAddr: httpAddr,
-		AdminToken:      "secret",
-		AuthTokens:      []string{"t"},
-		PollInterval:    config.Duration{Duration: 30 * time.Second},
+		ListenAddr:       tcpAddr,
+		AdminListenAddr:  httpAddr,
+		AdminToken:       "secret",
+		EnrollmentTokens: []string{"t"},
+		PollInterval:     config.Duration{Duration: 30 * time.Second},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

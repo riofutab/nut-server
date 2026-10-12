@@ -20,6 +20,7 @@ func TestMetricsEndpointExposesExpectedFamilies(t *testing.T) {
 	recordUPSPollResult(true)
 	recordUPSPollResult(false)
 	recordRegisterAttempt("accepted")
+	recordRegisterAttempt("enrolled")
 	recordRegisterAttempt("rejected")
 	recordRegisterAttempt("invalid")
 	recordShutdownIssued()
@@ -42,6 +43,7 @@ func TestMetricsEndpointExposesExpectedFamilies(t *testing.T) {
 		`nut_master_ups_poll_total{result="success"}`,
 		`nut_master_ups_poll_total{result="error"}`,
 		`nut_master_register_attempts_total{result="accepted"}`,
+		`nut_master_register_attempts_total{result="enrolled"}`,
 		`nut_master_register_attempts_total{result="rejected"}`,
 		`nut_master_register_attempts_total{result="invalid"}`,
 		`nut_master_shutdowns_issued_total`,

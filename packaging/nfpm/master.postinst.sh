@@ -38,8 +38,8 @@ fi
 if [ ! -f /etc/nut-server/master.yaml ]; then
   cp /etc/nut-server/master.example.yaml /etc/nut-server/master.yaml
   # Generate a strong admin_token (the example placeholder is rejected at load).
-  # auth_tokens is deliberately left as the placeholder so the operator must set
-  # a shared fleet secret — the master refuses to start until they do.
+  # enrollment_tokens is deliberately left as the placeholder so the operator
+  # must set a fleet secret — the master refuses to start until they do.
   admin_token=$(random_hex)
   sed -i "s|replace-with-strong-admin-token|${admin_token}|" /etc/nut-server/master.yaml
   # Use an absolute, sandbox-writable state path (the relative example default is
@@ -57,7 +57,9 @@ cat <<'EOF'
 
 nut-master installed.
 
-  Edit /etc/nut-server/master.yaml (admin_token, auth_tokens, snmp.target).
-  Then: sudo systemctl enable --now nut-master
+  Edit /etc/nut-server/master.yaml (enrollment_tokens, snmp.target,
+  shutdown_policies). Check it as the service user, then start:
+    sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
+    sudo systemctl enable --now nut-master
 
 EOF

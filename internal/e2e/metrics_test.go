@@ -27,10 +27,10 @@ func TestE2EMetricsReflectsClosedLoop(t *testing.T) {
 	preBody := rm.FetchMetrics(t)
 	preIssued := parseCounter(t, preBody, `nut_master_shutdowns_issued_total\s+([0-9.e+]+)`)
 	preSimulated := parseCounter(t, preBody, `nut_master_shutdown_acks_total\{status="simulated"\}\s+([0-9.e+]+)`)
-	preAccepted := parseCounter(t, preBody, `nut_master_register_attempts_total\{result="accepted"\}\s+([0-9.e+]+)`)
+	preEnrolled := parseCounter(t, preBody, `nut_master_register_attempts_total\{result="enrolled"\}\s+([0-9.e+]+)`)
 
-	if preAccepted < 1 {
-		t.Fatalf("expected at least one accepted register before shutdown, got %f", preAccepted)
+	if preEnrolled < 1 {
+		t.Fatalf("expected the new slave to enroll before shutdown, got %f", preEnrolled)
 	}
 
 	dry := true

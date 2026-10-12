@@ -19,7 +19,11 @@ TLS_DISABLED="false"
 
 usage() {
   cat <<'EOF'
-usage: install-master.sh --token <token> --snmp-target <host> [--admin-token <token>] [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
+usage: install-master.sh --token <enrollment-token> --snmp-target <host> [--admin-token <token>] [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
+
+  --token <token>                enrollment token new slaves first register with; each node
+                                 is then issued its own token. Create per-node install
+                                 scripts with POST /nodes/<node_id>/install-script.
 
 TLS:
   --disable-tls                  force plain TCP and ignore all TLS certificate settings
@@ -253,8 +257,9 @@ listen_addr: "$LISTEN_ADDR"
 admin_listen_addr: "$ADMIN_LISTEN_ADDR"
 admin_token: "$ADMIN_TOKEN"
 state_file: "/var/lib/nut-server/master-state.json"
-auth_tokens:
+enrollment_tokens:
   - "$TOKEN"
+enrollment: open
 poll_interval: "10s"
 command_timeout: "30s"
 dry_run: true
@@ -266,20 +271,25 @@ tls:
   key_file: "$TLS_KEY_FILE"
   ca_file: "$TLS_CA_FILE"
   require_client_cert: $TLS_REQUIRE_CLIENT_CERT
-shutdown_policy:
-  require_on_battery: true
-  min_battery_charge: 30
-  min_runtime_minutes: 15
-  shutdown_reason: "UPS battery threshold reached"
+shutdown_policies:
+  - name: low-charge
+    when:
+      charge_below: 30
+    target:
+      all: true
+    reason: "UPS battery charge low"
+  - name: low-runtime
+    when:
+      runtime_below: 15
+    target:
+      all: true
+    reason: "UPS runtime low"
 snmp:
   target: "$SNMP_TARGET"
   port: 161
   community: "$SNMP_COMMUNITY"
   version: "2c"
   timeout_seconds: 2
-  output_source_oid: ".1.3.6.1.2.1.33.1.4.1.0"
-  charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
-  runtime_minutes_oid: ".1.3.6.1.2.1.33.1.2.3.0"
 EOF
   echo "generated $CONFIG_PATH for listen_addr=$LISTEN_ADDR snmp_target=$SNMP_TARGET"
 fi
@@ -289,5 +299,11 @@ chmod 0640 "$CONFIG_PATH"
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-master.service
 systemctl daemon-reload
 
+if ! runuser -u nut-server -- /usr/local/bin/nut-master -check-config -config "$CONFIG_PATH"; then
+  echo "config check failed; fix $CONFIG_PATH before starting nut-master (see docs/upgrade.md)" >&2
+  exit 1
+fi
+
 echo "installed nut-master"
 echo "run: systemctl enable --now nut-master"
+echo "then, per slave: curl -fsS -X POST -H \"Authorization: Bearer <admin_token>\" http://$ADMIN_LISTEN_ADDR/nodes/<node_id>/install-script | bash"

@@ -158,7 +158,7 @@ function renderNodes(nodes) {
   const rows = nodes.map(n => `
     <tr>
       <td class="state-${escape(n.state)}">${escape(n.state)}</td>
-      <td>${escape(n.node_id)}${n.expected ? ' <span class=badge>expected</span>' : ''}${n.dry_run ? ' <span class=badge>dry-run</span>' : ''}${n.shutdown_ready === false ? ' <span class="badge warn">cannot shut down</span>' : ''}</td>
+      <td>${escape(n.node_id)}${n.expected ? ' <span class=badge>expected</span>' : ''}${n.dry_run ? ' <span class=badge>dry-run</span>' : ''}${n.shutdown_ready === false ? ' <span class="badge warn">cannot shut down</span>' : ''}${n.connected && !n.enrolled ? ' <span class="badge warn">not enrolled</span>' : ''}</td>
       <td>${escape(n.hostname || '')}</td>
       <td>${(n.tags || []).map(t => '<span class=badge>'+escape(t)+'</span>').join('')}</td>
       <td>${fmtAge(n.last_seen)}</td>

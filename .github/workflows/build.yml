@@ -103,6 +103,7 @@ jobs:
           EOF
           sudo install -o root -g nut-server -m 0640 /tmp/slave.yaml /etc/nut-server/slave.yaml
           rm -f /tmp/slave.yaml
+          sudo -u nut-server /usr/local/bin/nut-slave -check-config -config /etc/nut-server/slave.yaml
           sudo systemctl start nut-slave
 
       - name: Install and start nut-master
@@ -113,18 +114,17 @@ jobs:
           admin_listen_addr: "127.0.0.1:9001"
           admin_token: "$(openssl rand -hex 24)"
           state_file: "/var/lib/nut-server/master-state.json"
-          auth_tokens:
+          enrollment_tokens:
             - "$(openssl rand -hex 24)"
           poll_interval: "10s"
           command_timeout: "30s"
           dry_run: false
           tls:
             disabled: true
-          shutdown_policy:
-            require_on_battery: true
-            min_battery_charge: 30
-            min_runtime_minutes: 15
-            shutdown_reason: "UPS battery threshold reached"
+          shutdown_policies:
+            - name: critical
+              when:
+                runtime_below: 15
           local_shutdown:
             enabled: true
             command:
@@ -141,12 +141,10 @@ jobs:
             community: "public"
             version: "2c"
             timeout_seconds: 2
-            output_source_oid: ".1.3.6.1.2.1.33.1.4.1.0"
-            charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
-            runtime_minutes_oid: ".1.3.6.1.2.1.33.1.2.3.0"
           EOF
           sudo install -o root -g nut-server -m 0640 /tmp/master.yaml /etc/nut-server/master.yaml
           rm -f /tmp/master.yaml
+          sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
           sudo systemctl start nut-master
 
       - name: Check shutdown command self-check
