@@ -10,6 +10,8 @@ master ↔ slave 的控制连接支持三种模式:
 
 > **头号坑**:slave 的 `tls.server_name` 必须等于 master 证书里的某个 DNS SAN,否则报 `x509: certificate is valid for ...`。生产**不要**用 `insecure_skip_verify: true`。
 
+这里的 `tls` 只管 slave 控制连接(`listen_addr`)。admin 口(状态页、管理 API、`/metrics`)的 HTTPS 用单独的 `admin_tls`,见文末。
+
 ---
 
 ## 用 openssl 签发一套自签 CA + 证书
@@ -104,3 +106,34 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:9001/status | j
 ```
 
 握手相关报错的排查见 [troubleshooting.md](troubleshooting.md#tls--mtls-握手失败)。
+
+---
+
+## 装机脚本内嵌的 CA
+
+master 的 `tls` 开启时,`POST /nodes/<node_id>/install-script` 生成的脚本会:
+
+- 把 master `tls.cert_file` 文件的内容内嵌进脚本,安装时作为 slave 的 CA(`--tls-ca-file`),复制到 `/etc/nut-server/ca.crt`;
+- 用脚本里 `master_addr` 的主机名(配了 `public_addr` 时即其主机名)作为 `--tls-server-name`,所以 master 证书的 SAN 要包含这个名字;`public_addr` 写 IP 时证书要有对应的 IP SAN;
+- 不带 `--disable-tls`。
+
+slave 因此信任的是 master 证书本身。master 换证书后,已安装的 slave 要更新 `/etc/nut-server/ca.crt`(或重新执行装机脚本),否则握手会失败。脚本不处理 mTLS 客户端证书;master 设了 `require_client_cert: true` 时,还要按上文给 slave 装客户端证书并配置 `tls.cert_file` / `tls.key_file`。
+
+手动执行 `install-slave.sh` / `quick-install-slave.sh` 时,`--tls-ca-file` 指定的文件同样会被复制到 `/etc/nut-server/ca.crt`。
+
+---
+
+## HTTPS 管理接口(admin_tls)
+
+```yaml
+admin_listen_addr: "10.0.0.10:9001"
+admin_tls:
+  cert_file: "/etc/nut-server/tls/admin.crt"
+  key_file: "/etc/nut-server/tls/admin.key"
+```
+
+- 两项必须同时设置或同时留空。设置后 admin 口改为 HTTPS,最低 TLS 1.2;状态页、管理 API 和 `/metrics` 都改走 `https://`。
+- 证书只在启动时加载,换证书后要重启 master。
+- 不校验客户端证书,访问控制仍靠 `admin_token`(`/metrics` 与 `/healthz`、`/readyz` 不鉴权)。
+- `admin_listen_addr` 不是回环地址又没配 `admin_tls` 时,master 启动时打 WARN:admin_token 会以明文传输。
+- 可以复用上文 openssl 步骤签一张 serverAuth 证书,SAN 写访问 admin 口用的主机名或 IP。用自签 CA 时,curl 要加 `--cacert ca.crt`,Prometheus 的 scrape 配置要加 `scheme: https` 和 `tls_config.ca_file`。
