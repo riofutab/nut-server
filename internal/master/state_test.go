@@ -16,7 +16,6 @@ func TestServerPersistsAndRestoresState(t *testing.T) {
 
 	issuedAt := time.Now().UTC()
 	timeoutAt := issuedAt.Add(30 * time.Second)
-	server.commandSeq.Store(4)
 	server.commands["shutdown-5"] = &shutdownCommandState{
 		Message: protocol.ShutdownMessage{
 			CommandID: "shutdown-5",
@@ -36,7 +35,8 @@ func TestServerPersistsAndRestoresState(t *testing.T) {
 		TimeoutAt: &timeoutAt,
 	}
 	server.activeCommand = "shutdown-5"
-	server.autoShutdownLatched = true
+	episodeStart := issuedAt.Add(-time.Minute)
+	server.episode = &autoEpisode{StartedAt: episodeStart, CommandID: "shutdown-5", FiredPolicies: []string{"default"}}
 	server.shutdownIssued.Store(true)
 	server.commandMu.Lock()
 	server.saveStateLocked()
@@ -49,11 +49,8 @@ func TestServerPersistsAndRestoresState(t *testing.T) {
 	if !restored.shutdownIssued.Load() {
 		t.Fatalf("expected shutdownIssued restored")
 	}
-	if !restored.autoShutdownLatched {
-		t.Fatalf("expected auto shutdown latch restored")
-	}
-	if restored.commandSeq.Load() != 4 {
-		t.Fatalf("expected command seq 4, got %d", restored.commandSeq.Load())
+	if restored.episode == nil || restored.episode.CommandID != "shutdown-5" || !restored.episode.StartedAt.Equal(episodeStart) {
+		t.Fatalf("expected episode restored, got %+v", restored.episode)
 	}
 	command, ok := restored.commands["shutdown-5"]
 	if !ok {

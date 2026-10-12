@@ -21,8 +21,13 @@ func (s *Server) runCommandWatcher(ctx context.Context) {
 		}
 		now := time.Now().UTC()
 		s.markTimedOutCommands(now)
+		s.retryEpisodeShutdown(now)
 		s.evaluateLocalShutdown(now, s.latestSuccessfulUPSStatus())
 	}
+}
+
+func (s *Server) emergencyRuntimeReached(upsStatus *UPSStatus) bool {
+	return upsStatus != nil && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes
 }
 
 func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
@@ -39,59 +44,93 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 	)
 
 	s.commandMu.Lock()
-	if s.localShutdown == nil {
-		s.commandMu.Unlock()
-		return
-	}
-
 	state := s.localShutdown
-	switch state.Phase {
-	case protocol.LocalShutdownPhaseWaitingRemote:
-		command, ok := s.commands[state.CommandID]
-		// Do NOT discard merely because activeCommand was cleared on completion:
-		// recordShutdownUpdate clears activeCommand and unlocks before starting
-		// local shutdown, and this watcher must not nil the state in that gap
-		// (which would leave the master running on a dying battery). Only an
-		// absent or reset (ReplayDisabled) command cancels local shutdown.
-		if !ok || command.ReplayDisabled {
-			s.localShutdown = nil
-			seq, content := s.snapshotStateLocked()
+	if state == nil {
+		// Emergency is a safety net independent of any "all" command: during an
+		// episode the master powers itself off at critical runtime even when no
+		// policy targets every node (or none has fired yet).
+		if s.episode == nil || !s.upsConfirmed.Load() || !s.emergencyRuntimeReached(upsStatus) {
 			s.commandMu.Unlock()
-			s.persistState(seq, content)
 			return
 		}
-		switch {
-		case remoteShutdownFinished(command):
-			// Backstop for the recordShutdownUpdate race: independently drive
-			// the master power-off once every remote node is done. Idempotent
-			// via beginLocalShutdownExecution's phase guard.
-			state.Trigger = protocol.LocalShutdownTriggerRemoteComplete
-			commandID = state.CommandID
-			trigger = state.Trigger
-			dirty = true
-		case upsStatus != nil && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes:
-			rebroadcastAt := now
-			state.Phase = protocol.LocalShutdownPhaseEmergency
-			state.Trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+		command, hasCommand := s.commands[s.episode.CommandID]
+		rebroadcastAt := now
+		state = &localShutdownState{
+			Phase:     protocol.LocalShutdownPhaseEmergency,
+			CommandID: s.episode.CommandID,
+			StartedAt: &rebroadcastAt,
+			Trigger:   protocol.LocalShutdownTriggerEmergencyRuntime,
+			DryRun:    s.cfg.DryRun,
+		}
+		if hasCommand {
+			state.DryRun = command.Message.DryRun
 			state.LastRebroadcastAt = &rebroadcastAt
-			commandID = state.CommandID
-			trigger = state.Trigger
 			replay = command.Message
 			replayNodes = replayableNodeIDs(command)
-			dirty = true
-		case state.DeadlineAt != nil && !now.Before(*state.DeadlineAt):
-			state.Phase = protocol.LocalShutdownPhaseWaitExpired
-			state.Trigger = protocol.LocalShutdownTriggerWaitExpired
-			commandID = state.CommandID
-			trigger = state.Trigger
-			dirty = true
 		}
-	case protocol.LocalShutdownPhaseWaitExpired:
+		s.localShutdown = state
 		commandID = state.CommandID
-		trigger = protocol.LocalShutdownTriggerWaitExpired
-	case protocol.LocalShutdownPhaseEmergency:
-		commandID = state.CommandID
-		trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+		trigger = state.Trigger
+		dirty = true
+	} else {
+		command, ok := s.commands[state.CommandID]
+		// Auto local shutdown restored from the state file waits for the first
+		// UPS reading, which ends the episode if power came back while the
+		// master was down.
+		if (!ok || command.Auto) && !s.upsConfirmed.Load() {
+			s.commandMu.Unlock()
+			return
+		}
+		switch state.Phase {
+		case protocol.LocalShutdownPhaseWaitingRemote:
+			// Do NOT discard merely because activeCommand was cleared on
+			// completion: recordShutdownUpdate clears activeCommand and unlocks
+			// before starting local shutdown, and this watcher must not nil the
+			// state in that gap. Only an absent or reset command cancels it.
+			if !ok || command.ReplayDisabled {
+				s.localShutdown = nil
+				seq, content := s.snapshotStateLocked()
+				s.commandMu.Unlock()
+				s.persistState(seq, content)
+				return
+			}
+			switch {
+			case remoteShutdownFinished(command):
+				// Backstop for the recordShutdownUpdate race: independently
+				// drive the master power-off once every remote node is done.
+				state.Trigger = protocol.LocalShutdownTriggerRemoteComplete
+				commandID = state.CommandID
+				trigger = state.Trigger
+				dirty = true
+			case s.emergencyRuntimeReached(upsStatus):
+				rebroadcastAt := now
+				state.Phase = protocol.LocalShutdownPhaseEmergency
+				state.Trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+				state.LastRebroadcastAt = &rebroadcastAt
+				commandID = state.CommandID
+				trigger = state.Trigger
+				replay = command.Message
+				replayNodes = replayableNodeIDs(command)
+				dirty = true
+			case state.DeadlineAt != nil && !now.Before(*state.DeadlineAt):
+				state.Phase = protocol.LocalShutdownPhaseWaitExpired
+				state.Trigger = protocol.LocalShutdownTriggerWaitExpired
+				commandID = state.CommandID
+				trigger = state.Trigger
+				dirty = true
+			}
+		case protocol.LocalShutdownPhaseWaitExpired:
+			commandID = state.CommandID
+			trigger = protocol.LocalShutdownTriggerWaitExpired
+		case protocol.LocalShutdownPhaseEmergency:
+			commandID = state.CommandID
+			trigger = protocol.LocalShutdownTriggerEmergencyRuntime
+		case protocol.LocalShutdownPhaseFailed:
+			if state.LastAttemptAt == nil || now.Sub(*state.LastAttemptAt) >= shutdownRetryInterval {
+				commandID = state.CommandID
+				trigger = state.Trigger
+			}
+		}
 	}
 	var seq uint64
 	var content []byte
@@ -107,7 +146,7 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 			"nodes", len(replayNodes))
 		s.replayShutdownToNodes(replay, replayNodes)
 	}
-	if commandID != "" {
+	if trigger != "" {
 		if trigger == protocol.LocalShutdownTriggerWaitExpired {
 			slog.Warn("local shutdown wait expired", "command_id", commandID)
 		}
@@ -119,19 +158,22 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	command := append([]string(nil), s.cfg.LocalShutdown.Command...)
 
 	s.commandMu.Lock()
-	if s.localShutdown == nil || s.localShutdown.CommandID != commandID || localShutdownExecutionStarted(s.localShutdown.Phase) {
+	if s.localShutdown == nil || s.localShutdown.CommandID != commandID || localShutdownTerminal(s.localShutdown.Phase) {
 		s.commandMu.Unlock()
 		return
 	}
+	attemptAt := time.Now().UTC()
 	s.localShutdown.Phase = protocol.LocalShutdownPhaseExecuting
 	s.localShutdown.Trigger = trigger
 	s.localShutdown.LastError = ""
+	s.localShutdown.LastAttemptAt = &attemptAt
+	dryRun := s.localShutdown.DryRun
 	seq, content := s.snapshotStateLocked()
 	s.commandMu.Unlock()
 	s.persistState(seq, content)
 
-	slog.Info("local shutdown starting", "command_id", commandID, "trigger", trigger)
-	err := s.localShutdownRunner(command, trigger)
+	slog.Info("local shutdown starting", "command_id", commandID, "trigger", trigger, "dry_run", dryRun)
+	err := s.localShutdownRunner(command, trigger, dryRun)
 
 	s.commandMu.Lock()
 	if s.localShutdown == nil || s.localShutdown.CommandID != commandID {
@@ -141,9 +183,10 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	if err != nil {
 		s.localShutdown.Phase = protocol.LocalShutdownPhaseFailed
 		s.localShutdown.LastError = err.Error()
-		slog.Error("local shutdown failed",
+		slog.Error("local shutdown failed, will retry",
 			"command_id", commandID,
 			"trigger", trigger,
+			"retry_in", shutdownRetryInterval,
 			"err", err)
 	} else {
 		s.localShutdown.Phase = protocol.LocalShutdownPhaseCompleted
@@ -154,11 +197,11 @@ func (s *Server) beginLocalShutdownExecution(commandID, trigger string) {
 	s.persistState(seq, content)
 }
 
-func (s *Server) runLocalShutdownCommand(command []string, trigger string) error {
+func (s *Server) runLocalShutdownCommand(command []string, trigger string, dryRun bool) error {
 	if len(command) == 0 {
 		return fmt.Errorf("local shutdown command is empty")
 	}
-	if s.cfg.DryRun {
+	if dryRun {
 		slog.Info("dry-run local shutdown", "trigger", trigger, "command", command)
 		return nil
 	}
@@ -199,9 +242,11 @@ func replayableNodeIDs(command *shutdownCommandState) map[string]struct{} {
 	return nodeIDs
 }
 
-func localShutdownExecutionStarted(phase string) bool {
+// localShutdownTerminal reports whether the master power-off is running or has
+// succeeded. Failed is not terminal: it is retried and may still be cancelled.
+func localShutdownTerminal(phase string) bool {
 	switch phase {
-	case protocol.LocalShutdownPhaseExecuting, protocol.LocalShutdownPhaseCompleted, protocol.LocalShutdownPhaseFailed:
+	case protocol.LocalShutdownPhaseExecuting, protocol.LocalShutdownPhaseCompleted:
 		return true
 	default:
 		return false
@@ -213,8 +258,9 @@ func (s *Server) localShutdownStatusLocked() *protocol.LocalShutdownStatus {
 		return nil
 	}
 	status := &protocol.LocalShutdownStatus{
-		Enabled: true,
-		Phase:   protocol.LocalShutdownPhaseIdle,
+		Enabled:      true,
+		Phase:        protocol.LocalShutdownPhaseIdle,
+		CommandReady: copyBool(s.localCommandReady),
 	}
 	if s.localShutdown == nil {
 		return status

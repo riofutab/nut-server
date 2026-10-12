@@ -73,6 +73,10 @@ func (s *Server) handleConn(conn net.Conn) {
 	client.Touch()
 	s.registry.Set(client)
 	s.directory.Observe(register.NodeID, register.Hostname, register.Tags, time.Now().UTC())
+	s.directory.SetSlaveInfo(register.NodeID, register.DryRun, register.ShutdownReady)
+	if register.ShutdownReady != nil && !*register.ShutdownReady {
+		slog.Error("slave reports its shutdown command cannot run", "node_id", register.NodeID)
+	}
 	s.saveStateForDirectoryChange()
 
 	if err := client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: true, Message: "registered"}); err != nil {
@@ -178,6 +182,14 @@ func (s *Server) handleEnvelope(client *Client, env protocol.Envelope) error {
 		// Bind the ack to the authenticated connection identity: a slave may
 		// only report status for itself, never forge acks for other nodes.
 		ack.NodeID = client.NodeID
+		if !isReportableShutdownStatus(ack.Status) {
+			recordShutdownAck(ack.Status)
+			slog.Warn("ignore shutdown ack with unsupported status",
+				"command_id", ack.CommandID,
+				"node_id", ack.NodeID,
+				"status", ack.Status)
+			return nil
+		}
 		// Bump the counter before recordShutdownUpdate publishes the new status
 		// to Status(): callers that observe the status (and tests) must never
 		// see an "executed" node whose ack counter has not advanced yet.

@@ -5,31 +5,47 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.23.x'
+          go-version: '1.27.x'
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -race ./...
+
+      - name: E2E tests
+        run: go test -race -tags e2e -count=1 ./internal/e2e/...
 
       - name: Install nfpm
+        env:
+          NFPM_VERSION: "2.41.3"
+          NFPM_DEB_SHA256: "f92bf886c0f96767abcdc17195449faadb93fb20105532609820a412b4b2a46f"
         run: |
-          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.41.3/nfpm_2.41.3_amd64.deb -o /tmp/nfpm.deb
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+          echo "${NFPM_DEB_SHA256}  /tmp/nfpm.deb" | sha256sum -c -
           sudo dpkg -i /tmp/nfpm.deb
 
       - name: Build release artifacts
-        run: VERSION=${{ github.ref_name }} ./scripts/package-release.sh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./scripts/package-release.sh
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
           body: |

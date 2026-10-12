@@ -5,8 +5,12 @@ if ! getent passwd nut-server >/dev/null; then
   useradd --system --home-dir /var/lib/nut-server --shell /usr/sbin/nologin nut-server
 fi
 
-chown -R nut-server:nut-server /etc/nut-server /var/lib/nut-server
-chmod 0750 /etc/nut-server /var/lib/nut-server
+# The service may read its config (tokens) but not modify it; only the state
+# directory is writable by nut-server.
+chown root:nut-server /etc/nut-server
+chmod 0750 /etc/nut-server
+chown -R nut-server:nut-server /var/lib/nut-server
+chmod 0750 /var/lib/nut-server
 
 if [ -f /etc/sudoers.d/nut-server-slave ]; then
   chown root:root /etc/sudoers.d/nut-server-slave
@@ -16,14 +20,21 @@ if [ -f /etc/sudoers.d/nut-server-slave ]; then
   fi
 fi
 
+# Older releases let nut-server own /etc/nut-server, so it could have swapped the
+# config for a symlink; refuse rather than write/chown/chmod the link target as root.
+if [ -L /etc/nut-server/slave.yaml ]; then
+  echo "/etc/nut-server/slave.yaml must not be a symbolic link" >&2
+  exit 1
+fi
+
 if [ ! -f /etc/nut-server/slave.yaml ]; then
   cp /etc/nut-server/slave.example.yaml /etc/nut-server/slave.yaml
   # Use an absolute, sandbox-writable state path (the relative example default is
   # read-only under the shipped systemd ProtectSystem=strict).
   sed -i 's|^state_file:.*|state_file: "/var/lib/nut-server/slave-state.json"|' /etc/nut-server/slave.yaml
-  chown nut-server:nut-server /etc/nut-server/slave.yaml
-  chmod 0640 /etc/nut-server/slave.yaml
 fi
+chown root:nut-server /etc/nut-server/slave.yaml
+chmod 0640 /etc/nut-server/slave.yaml
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true

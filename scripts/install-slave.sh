@@ -199,7 +199,8 @@ if ! getent passwd nut-server >/dev/null; then
 fi
 
 install -d /usr/local/bin /usr/local/lib/nut-server
-install -d -o nut-server -g nut-server -m 0750 /etc/nut-server /var/lib/nut-server
+install -d -o root -g nut-server -m 0750 /etc/nut-server
+install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-slave
 install -o root -g root -m 0440 "$SUDOERS_SOURCE" /etc/sudoers.d/nut-server-slave
 if command -v visudo >/dev/null 2>&1; then
@@ -245,7 +246,7 @@ EOF
   fi
   echo "generated $CONFIG_PATH for node_id=$NODE_ID master_addr=$MASTER_ADDR"
 fi
-chown nut-server:nut-server "$CONFIG_PATH"
+chown root:nut-server "$CONFIG_PATH"
 chmod 0640 "$CONFIG_PATH"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-slave.service

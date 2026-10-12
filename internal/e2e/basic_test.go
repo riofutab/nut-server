@@ -28,12 +28,12 @@ func TestE2ERegisterAndShutdownClosesLoop(t *testing.T) {
 	dry := true
 	rm.TriggerShutdown(t, protocol.ShutdownRequest{Reason: "e2e drill", DryRun: &dry})
 
-	waitUntil(t, "both slaves executed", func() bool {
+	waitUntil(t, "both slaves simulated", func() bool {
 		status := rm.Status(t)
 		alpha := nodeByID(status, "slave-alpha")
 		beta := nodeByID(status, "slave-beta")
-		return alpha != nil && alpha.LastShutdown != nil && alpha.LastShutdown.Status == protocol.ShutdownStatusExecuted &&
-			beta != nil && beta.LastShutdown != nil && beta.LastShutdown.Status == protocol.ShutdownStatusExecuted
+		return alpha != nil && alpha.LastShutdown != nil && alpha.LastShutdown.Status == protocol.ShutdownStatusSimulated &&
+			beta != nil && beta.LastShutdown != nil && beta.LastShutdown.Status == protocol.ShutdownStatusSimulated
 	})
 
 	waitUntil(t, "shutdown_issued cleared", func() bool {
@@ -63,10 +63,10 @@ func TestE2EShutdownTargetsSingleNodeByTag(t *testing.T) {
 	dry := true
 	rm.TriggerShutdown(t, protocol.ShutdownRequest{Reason: "tag-targeted", Tags: []string{"web"}, DryRun: &dry})
 
-	waitUntil(t, "web slave executed", func() bool {
+	waitUntil(t, "web slave simulated", func() bool {
 		status := rm.Status(t)
 		web := nodeByID(status, "slave-web")
-		return web != nil && web.LastShutdown != nil && web.LastShutdown.Status == protocol.ShutdownStatusExecuted
+		return web != nil && web.LastShutdown != nil && web.LastShutdown.Status == protocol.ShutdownStatusSimulated
 	})
 
 	status := rm.Status(t)

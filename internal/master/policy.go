@@ -8,19 +8,6 @@ import (
 	"nut-server/internal/protocol"
 )
 
-func ShouldShutdown(status UPSStatus, policy config.ShutdownPolicy) bool {
-	if policy.RequireOnBattery && !status.OnBattery {
-		return false
-	}
-	if policy.MinBatteryCharge > 0 && status.BatteryCharge > policy.MinBatteryCharge {
-		return false
-	}
-	if policy.MinRuntimeMinutes > 0 && status.RuntimeMinutes > policy.MinRuntimeMinutes {
-		return false
-	}
-	return true
-}
-
 type PolicyMatch struct {
 	Names   []string
 	Reason  string
@@ -70,13 +57,15 @@ func policyMatches(status UPSStatus, when config.ShutdownPolicyWhen) bool {
 	return true
 }
 
-func (m PolicyMatch) ToRequest() protocol.ShutdownRequest {
-	req := protocol.ShutdownRequest{Reason: m.Reason}
-	if !m.All {
-		req.Tags = append([]string(nil), m.Tags...)
-		req.NodeIDs = append([]string(nil), m.NodeIDs...)
+// Target is the shutdown target covering every matched policy.
+func (m PolicyMatch) Target() protocol.ShutdownTarget {
+	if m.All {
+		return protocol.ShutdownTarget{All: true}
 	}
-	return req
+	return protocol.ShutdownTarget{
+		Tags:    append([]string(nil), m.Tags...),
+		NodeIDs: append([]string(nil), m.NodeIDs...),
+	}
 }
 
 func buildPolicyReason(policies []config.ShutdownPolicySpec, names []string) string {

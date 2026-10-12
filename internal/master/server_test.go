@@ -427,30 +427,24 @@ func TestRecordShutdownUpdateDoesNotClearActiveCommandForOlderCompletion(t *test
 	}
 }
 
-func TestAutoShutdownLatchPreventsRepeatedUPSTriggersUntilReset(t *testing.T) {
+func TestAutoCommandStaysActiveAfterAllNodesComplete(t *testing.T) {
 	server := NewServer(config.MasterConfig{
 		DryRun:         true,
 		CommandTimeout: config.Duration{Duration: 30 * time.Second},
-		ShutdownPolicy: config.ShutdownPolicy{ShutdownReason: "ups low"},
 	})
 	server.shutdownIssued.Store(true)
 	server.activeCommand = "shutdown-1"
-	server.autoShutdownLatched = true
+	server.episode = &autoEpisode{StartedAt: time.Now().UTC(), CommandID: "shutdown-1", FiredPolicies: []string{"default"}}
 	server.commands["shutdown-1"] = &shutdownCommandState{
 		Message: protocol.ShutdownMessage{
 			CommandID: "shutdown-1",
 			Reason:    "ups low",
 			IssuedAt:  time.Now().UTC(),
+			Target:    protocol.ShutdownTarget{All: true},
 		},
 		TargetNodes: map[string]struct{}{"node-1": {}},
-		NodeUpdates: map[string]protocol.ShutdownAckMessage{
-			"node-1": {
-				CommandID: "shutdown-1",
-				NodeID:    "node-1",
-				Status:    protocol.ShutdownStatusAccepted,
-				AckedAt:   time.Now().UTC(),
-			},
-		},
+		NodeUpdates: map[string]protocol.ShutdownAckMessage{},
+		Auto:        true,
 	}
 
 	server.recordShutdownUpdate(protocol.ShutdownAckMessage{
@@ -461,10 +455,10 @@ func TestAutoShutdownLatchPreventsRepeatedUPSTriggersUntilReset(t *testing.T) {
 	})
 
 	server.commandMu.Lock()
-	latched := server.autoShutdownLatched
+	active := server.activeCommand
 	server.commandMu.Unlock()
-	if !latched {
-		t.Fatalf("expected auto shutdown latch to remain set after completion")
+	if active != "shutdown-1" {
+		t.Fatalf("expected auto command to stay active until line power, got %q", active)
 	}
 }
 
@@ -618,7 +612,7 @@ func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
 	server := NewServer(config.MasterConfig{})
 	server.shutdownIssued.Store(true)
 	server.activeCommand = "shutdown-1"
-	server.autoShutdownLatched = true
+	server.episode = &autoEpisode{StartedAt: time.Now().UTC(), CommandID: "shutdown-1"}
 
 	server.ResetActiveCommand()
 
@@ -628,8 +622,8 @@ func TestResetActiveCommandClearsIssuedFlag(t *testing.T) {
 	if server.activeCommand != "" {
 		t.Fatalf("expected active command cleared")
 	}
-	if server.autoShutdownLatched {
-		t.Fatalf("expected auto shutdown latch cleared")
+	if server.episode != nil {
+		t.Fatalf("expected episode cleared")
 	}
 }
 
@@ -1018,7 +1012,7 @@ type localShutdownRecorder struct {
 	triggers []string
 }
 
-func (r *localShutdownRecorder) run(_ []string, trigger string) error {
+func (r *localShutdownRecorder) run(_ []string, trigger string, _ bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.triggers = append(r.triggers, trigger)

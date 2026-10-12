@@ -94,6 +94,7 @@ func recordShutdownAck(status string) {
 	case protocol.ShutdownStatusAccepted,
 		protocol.ShutdownStatusExecuting,
 		protocol.ShutdownStatusExecuted,
+		protocol.ShutdownStatusSimulated,
 		protocol.ShutdownStatusFailed,
 		protocol.ShutdownStatusTimeout:
 		metricShutdownAcks.WithLabelValues(status).Inc()

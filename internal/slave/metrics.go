@@ -29,10 +29,49 @@ var (
 	})
 
 	slaveConnected atomic.Bool
+	// slaveShutdownReady holds one of the shutdownReady* states below.
+	slaveShutdownReady atomic.Int32
 
 	slaveRegistry     *prometheus.Registry
 	slaveRegistryOnce sync.Once
 )
+
+const (
+	shutdownReadyUnchecked int32 = iota
+	shutdownReadyTrue
+	shutdownReadyFalse
+)
+
+// shutdownReadyCollector emits nut_slave_shutdown_ready only once the startup
+// self-check has run, so a dry-run slave does not report a misleading value.
+type shutdownReadyCollector struct {
+	desc *prometheus.Desc
+}
+
+func newShutdownReadyCollector() shutdownReadyCollector {
+	return shutdownReadyCollector{desc: prometheus.NewDesc(
+		"nut_slave_shutdown_ready",
+		"1 if the startup self-check found the shutdown command executable, 0 if not. Absent when the check was skipped (dry-run).",
+		nil, nil,
+	)}
+}
+
+func (c shutdownReadyCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.desc
+}
+
+func (c shutdownReadyCollector) Collect(ch chan<- prometheus.Metric) {
+	var value float64
+	switch slaveShutdownReady.Load() {
+	case shutdownReadyTrue:
+		value = 1
+	case shutdownReadyFalse:
+		value = 0
+	default:
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, value)
+}
 
 func slavePromRegistry() *prometheus.Registry {
 	slaveRegistryOnce.Do(func() {
@@ -48,6 +87,7 @@ func buildSlaveRegistry() *prometheus.Registry {
 		metricShutdownsReceived,
 		metricShutdownStatus,
 		metricBuildInfoSlave,
+		newShutdownReadyCollector(),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "nut_slave_connected",
 			Help: "1 while the slave has an active session with the master, 0 otherwise.",
@@ -82,4 +122,12 @@ func recordShutdownStatus(status string) {
 
 func setConnected(v bool) {
 	slaveConnected.Store(v)
+}
+
+func setShutdownReady(ready bool) {
+	if ready {
+		slaveShutdownReady.Store(shutdownReadyTrue)
+		return
+	}
+	slaveShutdownReady.Store(shutdownReadyFalse)
 }

@@ -97,9 +97,10 @@ curl -s .../metrics | grep -E 'shutdowns_issued|shutdown_acks'
 ```
 
 常见根因:
-- **策略阈值没命中**:核对 `shutdown_policy` / `shutdown_policies` 的 `on_battery` / `charge_below` / `runtime_below` 与 `/status` 里的 UPS 实际读数。
-- **闩锁未复位**:一次掉电后 `auto_shutdown_latched` 置位,需市电恢复(`on_battery=false`)才会清。可 `POST /commands/reset` 手动清。
-- **dry_run 开着**:`dry_run: true` 时只模拟不真正关机。日志有 `dry-run` 字样。
+- **策略阈值没命中**:核对 `shutdown_policies` 的 `charge_below` / `runtime_below` 与 `/status` 里的 UPS 实际读数。策略只在 UPS 走电池时评估,市电下不会触发。
+- **该策略本次断电已触发过**:`/status` 的 `episode.fired_policies` 列出本次断电已触发的策略,每条策略在一次断电内只触发一次。市电恢复后 episode 结束;`POST /commands/reset` 也会结束当前 episode。
+- **dry_run 开着**:`dry_run: true` 时只模拟不真正关机,节点回报 `simulated`。`/status` 的节点带 `dry_run: true` 的是 slave 本地开着 dry-run。
+- **关机权限不通**:节点 `shutdown_ready: false`,或日志有 `shutdown command self-check failed`。按日志里的错误检查 sudoers 与 systemd unit(见下文 local_shutdown 一节)。
 - **没有匹配的 target**:手动关机返回 `400 no target nodes matched`。
 
 ---
@@ -113,7 +114,7 @@ journalctl -u nut-slave | grep -i shutdown
 
 常见根因:
 - **自定义关机脚本 hang**:v0.5.0 起 slave/master 的关机命令受 `shutdown_command_timeout`(默认 2m)约束,超时会上报 `failed` 并由 master 重试。若脚本本就需要更久,调大该值。
-- **节点掉线未回执**:master 在 `command_timeout`(默认 30s)后标 `timeout`;节点重连后会被 replay(除非已 `executed`)。
+- **节点掉线未回执**:master 在 `command_timeout`(默认 30s)后标 `timeout`;节点重连后会被 replay(除非已 `executed`)。断电期间 master 每 30s 对 `failed` / `timeout` 的节点重发一次。
 
 ---
 
@@ -128,7 +129,8 @@ curl -s .../status | jq '.local_shutdown'   # phase / trigger / last_error
 - `waiting_remote`:仍在等远端 `executed`/`failed`。
 - `wait_expired`:超过 `max_wait` 兜底,准备关 master。
 - `emergency`:UPS 续航低于 `emergency_runtime_minutes`,提前关。
-- `failed` + `last_error`:多半是 sudo 没放行。确认随包的 `/etc/sudoers.d/nut-server-master` 存在且 `visudo -c` 通过,命令为 `sudo -n /sbin/shutdown -h now`。
+- `failed` + `last_error`:多半是 sudo 没放行。master 每 30s 重试一次。确认随包的 `/etc/sudoers.d/nut-server-master` 存在且 `visudo -c` 通过,命令为 `sudo -n /sbin/shutdown -h now`,并且 unit 是 v0.5.2+ 的版本(旧 unit 会隐式开启 NoNewPrivileges,sudo 无法提权)。`/status` 的 `local_shutdown.command_ready` 是启动时的自检结果。
+- 一直 `idle`:只有目标为全部节点的命令才会进入等待流程;只针对部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes` 时无论如何都会关 master。
 
 ---
 

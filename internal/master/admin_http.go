@@ -16,6 +16,20 @@ import (
 	"nut-server/internal/protocol"
 )
 
+const (
+	adminReadHeaderTimeout = 10 * time.Second
+	// maxAdminRequestBody bounds JSON request bodies; every admin payload is a
+	// few hundred bytes.
+	maxAdminRequestBody = 64 << 10
+)
+
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAdminRequestBody)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) runAdminServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -30,7 +44,7 @@ func (s *Server) runAdminServer(ctx context.Context) {
 	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
 	mux.HandleFunc("GET /install/slave", s.requireAdminToken(s.handleInstallSlave))
 
-	srv := &http.Server{Addr: s.cfg.AdminListenAddr, Handler: mux}
+	srv := &http.Server{Addr: s.cfg.AdminListenAddr, Handler: limitRequestBody(mux), ReadHeaderTimeout: adminReadHeaderTimeout}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

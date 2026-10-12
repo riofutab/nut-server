@@ -170,6 +170,9 @@ func (c TLSConfig) EnabledForClient() bool {
 }
 
 func (c TLSConfig) ValidateServer() error {
+	if c.BindNodeIDToCert && !c.RequireClientCert {
+		return fmt.Errorf("tls.bind_node_id_to_cert requires tls.require_client_cert: true; without client certificates there is nothing to bind the node_id to")
+	}
 	if c.Disabled {
 		if c.Enabled || c.CertFile != "" || c.KeyFile != "" || c.CAFile != "" || c.RequireClientCert {
 			return fmt.Errorf("tls.disabled cannot be combined with other tls.* settings; remove disabled or clear enabled/cert_file/key_file/ca_file/require_client_cert")
@@ -187,6 +190,9 @@ func (c TLSConfig) ValidateServer() error {
 	}
 	if c.RequireClientCert && c.CAFile == "" {
 		return fmt.Errorf("tls.ca_file must not be empty when tls.require_client_cert is true")
+	}
+	if c.CAFile != "" && !c.RequireClientCert {
+		return fmt.Errorf("tls.ca_file requires tls.require_client_cert: true; on the master the CA is only used to verify client certificates")
 	}
 	return nil
 }
@@ -283,6 +289,9 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.SNMP.Port == 0 {
 		cfg.SNMP.Port = 161
 	}
+	if err := normalizeSNMPVersion(&cfg.SNMP); err != nil {
+		return MasterConfig{}, err
+	}
 	if cfg.SNMP.TimeoutSeconds == 0 {
 		cfg.SNMP.TimeoutSeconds = 2
 	}
@@ -304,21 +313,46 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	return cfg, nil
 }
 
+func normalizeSNMPVersion(snmp *SNMPConfig) error {
+	switch snmp.Version {
+	case "":
+		snmp.Version = "2c"
+	case "1", "2c":
+	case "3":
+		return fmt.Errorf("snmp.version \"3\": SNMPv3 is not supported yet; use \"1\" or \"2c\"")
+	default:
+		return fmt.Errorf("snmp.version %q is invalid; use \"1\" or \"2c\"", snmp.Version)
+	}
+	return nil
+}
+
+func hasWhenCondition(w ShutdownPolicyWhen) bool {
+	return w.OnBattery != nil || w.ChargeBelow > 0 || w.RuntimeBelow > 0
+}
+
 func normalizeShutdownPolicies(cfg *MasterConfig) error {
 	if len(cfg.ShutdownPolicies) == 0 {
-		on := cfg.ShutdownPolicy.RequireOnBattery
+		// require_on_battery: false means "no battery requirement", i.e. an
+		// unset condition; &false would instead demand the UPS be on mains.
+		var onBattery *bool
+		if cfg.ShutdownPolicy.RequireOnBattery {
+			on := true
+			onBattery = &on
+		}
 		spec := ShutdownPolicySpec{
 			Name: "default",
 			When: ShutdownPolicyWhen{
-				OnBattery:    &on,
+				OnBattery:    onBattery,
 				ChargeBelow:  cfg.ShutdownPolicy.MinBatteryCharge,
 				RuntimeBelow: cfg.ShutdownPolicy.MinRuntimeMinutes,
 			},
 			Target: ShutdownPolicyTarget{All: true},
 			Reason: cfg.ShutdownPolicy.ShutdownReason,
 		}
+		if !hasWhenCondition(spec.When) {
+			return fmt.Errorf("no shutdown condition configured: define shutdown_policies (or set require_on_battery/min_battery_charge/min_runtime_minutes in the legacy shutdown_policy)")
+		}
 		cfg.ShutdownPolicies = []ShutdownPolicySpec{spec}
-		return nil
 	}
 	seen := make(map[string]struct{}, len(cfg.ShutdownPolicies))
 	for i, p := range cfg.ShutdownPolicies {
@@ -329,8 +363,11 @@ func normalizeShutdownPolicies(cfg *MasterConfig) error {
 			return fmt.Errorf("shutdown_policies[%d].name %q is duplicated", i, p.Name)
 		}
 		seen[p.Name] = struct{}{}
-		if p.When.OnBattery == nil && p.When.ChargeBelow <= 0 && p.When.RuntimeBelow <= 0 {
+		if !hasWhenCondition(p.When) {
 			return fmt.Errorf("shutdown_policies[%d] (%q) must specify at least one when condition", i, p.Name)
+		}
+		if p.When.OnBattery != nil && !*p.When.OnBattery {
+			return fmt.Errorf("shutdown_policies[%d] (%q): when.on_battery: false is not supported; policies are only evaluated while the UPS is on battery, so remove it or set it to true", i, p.Name)
 		}
 		if !p.Target.All && len(p.Target.Tags) == 0 && len(p.Target.NodeIDs) == 0 {
 			cfg.ShutdownPolicies[i].Target.All = true

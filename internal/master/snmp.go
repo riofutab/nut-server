@@ -36,6 +36,16 @@ func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
 	if err != nil {
 		return UPSStatus{}, fmt.Errorf("read ups oids: %w", err)
 	}
+	return decodeUPSPacket(cfg, packet)
+}
+
+func decodeUPSPacket(cfg config.SNMPConfig, packet *gosnmp.SnmpPacket) (UPSStatus, error) {
+	// An agent reports a failed request (e.g. SNMPv1 noSuchName) through the
+	// PDU error status while echoing Null varbinds; reading those would yield
+	// zeros that look like an empty battery.
+	if packet.Error != gosnmp.NoError {
+		return UPSStatus{}, fmt.Errorf("snmp agent error %v at index %d", packet.Error, packet.ErrorIndex)
+	}
 	if len(packet.Variables) != 3 {
 		return UPSStatus{}, fmt.Errorf("unexpected variable count: got %d want 3", len(packet.Variables))
 	}
@@ -59,20 +69,19 @@ func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
 	}, nil
 }
 
-// decodeIntVariable rejects an SNMP exception varbind (unsupported/typo'd OID),
-// which otherwise decodes to a non-nil big.Int(0) via ToBigInt and would be
-// misread as a genuine 0 — a critically low charge/runtime. Surfacing it as an
-// error turns a misconfigured OID into a poll failure instead of a false reading.
+// decodeIntVariable accepts only integer-typed varbinds. gosnmp.ToBigInt maps
+// every other type (Null, OctetString, exception varbinds) to 0, which would be
+// misread as a critically low charge/runtime; surfacing it as an error turns a
+// misconfigured OID into a poll failure instead of a false reading.
 func decodeIntVariable(oid string, variable gosnmp.SnmpPDU) (int, error) {
 	switch variable.Type {
+	case gosnmp.Integer, gosnmp.Gauge32, gosnmp.Counter32, gosnmp.Uinteger32, gosnmp.TimeTicks:
+		return int(gosnmp.ToBigInt(variable.Value).Int64()), nil
 	case gosnmp.NoSuchObject, gosnmp.NoSuchInstance, gosnmp.EndOfMibView:
 		return 0, fmt.Errorf("oid %s not available on device (%v)", oid, variable.Type)
+	default:
+		return 0, fmt.Errorf("oid %s has non-integer type %v", oid, variable.Type)
 	}
-	value := gosnmp.ToBigInt(variable.Value)
-	if value == nil {
-		return 0, fmt.Errorf("oid %s has empty value", oid)
-	}
-	return int(value.Int64()), nil
 }
 
 func parseVersion(version string) gosnmp.SnmpVersion {

@@ -12,6 +12,10 @@ type NodeMeta struct {
 	FirstSeen *time.Time `json:"first_seen,omitempty"`
 	LastSeen  *time.Time `json:"last_seen,omitempty"`
 	Expected  bool       `json:"expected,omitempty"`
+	DryRun    bool       `json:"dry_run,omitempty"`
+	// ShutdownReady is the slave's startup self-check of its shutdown command
+	// as reported at registration (nil = not checked, e.g. dry-run).
+	ShutdownReady *bool `json:"shutdown_ready,omitempty"`
 }
 
 type NodeDirectory struct {
@@ -43,6 +47,18 @@ func (d *NodeDirectory) Observe(nodeID, hostname string, tags []string, now time
 	if tags != nil {
 		meta.Tags = append([]string(nil), tags...)
 	}
+}
+
+// SetSlaveInfo records what the slave reported about itself at registration.
+func (d *NodeDirectory) SetSlaveInfo(nodeID string, dryRun bool, shutdownReady *bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	meta, ok := d.nodes[nodeID]
+	if !ok {
+		return
+	}
+	meta.DryRun = dryRun
+	meta.ShutdownReady = copyBool(shutdownReady)
 }
 
 func (d *NodeDirectory) Touch(nodeID string, now time.Time) {
@@ -157,5 +173,14 @@ func copyMeta(m NodeMeta) NodeMeta {
 	if m.Tags != nil {
 		m.Tags = append([]string(nil), m.Tags...)
 	}
+	m.ShutdownReady = copyBool(m.ShutdownReady)
 	return m
+}
+
+func copyBool(src *bool) *bool {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
 }

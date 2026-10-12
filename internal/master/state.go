@@ -11,12 +11,11 @@ import (
 )
 
 type persistedState struct {
-	CommandSeq          uint64                           `json:"command_seq"`
-	ActiveCommand       string                           `json:"active_command,omitempty"`
-	AutoShutdownLatched bool                             `json:"auto_shutdown_latched,omitempty"`
-	LocalShutdown       *localShutdownState              `json:"local_shutdown,omitempty"`
-	Commands            map[string]*shutdownCommandState `json:"commands,omitempty"`
-	Nodes               map[string]*NodeMeta             `json:"nodes,omitempty"`
+	ActiveCommand string                           `json:"active_command,omitempty"`
+	Episode       *autoEpisode                     `json:"episode,omitempty"`
+	LocalShutdown *localShutdownState              `json:"local_shutdown,omitempty"`
+	Commands      map[string]*shutdownCommandState `json:"commands,omitempty"`
+	Nodes         map[string]*NodeMeta             `json:"nodes,omitempty"`
 }
 
 func (s *Server) loadState() {
@@ -41,9 +40,8 @@ func (s *Server) loadState() {
 	}
 	s.commands = state.Commands
 	s.activeCommand = state.ActiveCommand
-	s.autoShutdownLatched = state.AutoShutdownLatched
+	s.episode = state.Episode
 	s.localShutdown = persistedLocalShutdownState(state.LocalShutdown)
-	s.commandSeq.Store(state.CommandSeq)
 	s.shutdownIssued.Store(state.ActiveCommand != "")
 	s.normalizeLoadedLocalShutdown()
 	if state.Nodes != nil {
@@ -69,12 +67,11 @@ func (s *Server) snapshotStateLocked() (uint64, []byte) {
 		return 0, nil
 	}
 	state := persistedState{
-		CommandSeq:          s.commandSeq.Load(),
-		ActiveCommand:       s.activeCommand,
-		AutoShutdownLatched: s.autoShutdownLatched,
-		LocalShutdown:       persistedLocalShutdownState(s.localShutdown),
-		Commands:            s.commands,
-		Nodes:               s.directory.snapshotForPersist(),
+		ActiveCommand: s.activeCommand,
+		Episode:       s.episode,
+		LocalShutdown: persistedLocalShutdownState(s.localShutdown),
+		Commands:      s.commands,
+		Nodes:         s.directory.snapshotForPersist(),
 	}
 	content, err := json.Marshal(state)
 	if err != nil {
@@ -122,13 +119,17 @@ func (s *Server) normalizeLoadedLocalShutdown() {
 		return
 	}
 	switch s.localShutdown.Phase {
-	case protocol.LocalShutdownPhaseWaitingRemote, protocol.LocalShutdownPhaseWaitExpired, protocol.LocalShutdownPhaseEmergency:
+	case protocol.LocalShutdownPhaseWaitingRemote, protocol.LocalShutdownPhaseWaitExpired, protocol.LocalShutdownPhaseEmergency, protocol.LocalShutdownPhaseFailed:
 	default:
 		s.localShutdown = nil
 		return
 	}
+	// An emergency armed before any policy fired has no command; it belongs to
+	// the restored episode and is kept only while that episode exists.
 	if s.localShutdown.CommandID == "" {
-		s.localShutdown = nil
+		if s.episode == nil || s.episode.CommandID != "" {
+			s.localShutdown = nil
+		}
 		return
 	}
 	command, ok := s.commands[s.localShutdown.CommandID]
@@ -145,7 +146,7 @@ func persistedLocalShutdownState(state *localShutdownState) *localShutdownState 
 		return nil
 	}
 	switch state.Phase {
-	case protocol.LocalShutdownPhaseWaitingRemote, protocol.LocalShutdownPhaseWaitExpired, protocol.LocalShutdownPhaseEmergency:
+	case protocol.LocalShutdownPhaseWaitingRemote, protocol.LocalShutdownPhaseWaitExpired, protocol.LocalShutdownPhaseEmergency, protocol.LocalShutdownPhaseFailed:
 	default:
 		return nil
 	}
@@ -157,5 +158,7 @@ func persistedLocalShutdownState(state *localShutdownState) *localShutdownState 
 		Trigger:           state.Trigger,
 		LastRebroadcastAt: copyTime(state.LastRebroadcastAt),
 		LastError:         state.LastError,
+		LastAttemptAt:     copyTime(state.LastAttemptAt),
+		DryRun:            state.DryRun,
 	}
 }

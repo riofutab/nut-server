@@ -5,9 +5,10 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/upgrade-common.sh"
 
 require_root
-install -d /usr/local/lib/nut-server /etc/nut-server /var/lib/nut-server
+secure_install_layout /etc/nut-server/master.yaml
 install_binary_from_package nut-master
 install_service_from_package nut-master.service
+install_sudoers_from_package nut-server-master
 reload_systemd
 restart_if_active nut-master
 
