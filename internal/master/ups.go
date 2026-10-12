@@ -26,7 +26,7 @@ func (s *Server) runPollingLoop(ctx context.Context) {
 
 func (s *Server) evaluateUPS() error {
 	polledAt := time.Now().UTC()
-	status, err := ReadUPSStatus(s.cfg.SNMP)
+	status, err := s.upsReader(s.cfg.SNMP)
 	recordUPSPollDuration(time.Since(polledAt).Seconds())
 	if err != nil {
 		s.recordUPSError(err, polledAt)
@@ -35,21 +35,19 @@ func (s *Server) evaluateUPS() error {
 	}
 	s.recordUPSSuccess(status, polledAt)
 	recordUPSPollResult(true)
+	s.upsConfirmed.Store(true)
 	if !status.OnBattery {
-		// Line power restored: end the current on-battery episode so the next
-		// independent outage can auto-trigger again, and release a completed
-		// command that would otherwise pin activeCommand forever.
-		s.clearAutoShutdownLatchOnLinePower()
-	}
-	match, triggered := EvaluatePolicies(status, s.cfg.ShutdownPolicies)
-	if !triggered {
+		s.endEpisodeOnLinePower()
 		return nil
 	}
-	_, _, err = s.triggerShutdown(match.ToRequest(), true)
-	if err != nil && err == errShutdownAlreadyActive {
-		return nil
+	// Policies are only evaluated while on battery: on line power the nodes are
+	// powered, and a charge/runtime threshold there would shut down nodes that
+	// boot back up while the battery recharges.
+	s.startEpisodeIfNeeded(polledAt)
+	if match, triggered := EvaluatePolicies(status, s.cfg.ShutdownPolicies); triggered {
+		s.applyPolicyMatch(match, polledAt)
 	}
-	return err
+	return nil
 }
 
 func (s *Server) latestSuccessfulUPSStatus() *UPSStatus {

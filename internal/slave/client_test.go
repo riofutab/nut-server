@@ -499,3 +499,87 @@ func TestRunReturnsCleanlyWhenContextCancelled(t *testing.T) {
 		t.Fatal("slave Run did not return within 2s of context cancel")
 	}
 }
+
+func TestHandleShutdownInDryRunAcksSimulatedWithoutExecuting(t *testing.T) {
+	cases := []struct {
+		name         string
+		configDryRun bool
+		cmdDryRun    bool
+	}{
+		{name: "config dry-run", configDryRun: true},
+		{name: "command dry-run", cmdDryRun: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient(config.SlaveConfig{NodeID: "node-1", DryRun: tc.configDryRun})
+			executor := &fakeShutdownExecutor{}
+			client.shutdown = executor
+			conn, peer := net.Pipe()
+			defer conn.Close()
+			defer peer.Close()
+			reader := bufio.NewReader(peer)
+			shutdown := protocol.Envelope{
+				Type: protocol.TypeShutdown,
+				Data: protocol.ShutdownMessage{CommandID: "shutdown-dry", DryRun: tc.cmdDryRun, IssuedAt: time.Now().UTC()},
+			}
+
+			errCh := make(chan error, 1)
+			go func() { errCh <- client.handleEnvelope(shutdown, newConnectionSession(conn)) }()
+			first := readShutdownUpdate(t, peer, reader)
+			final := readShutdownUpdate(t, peer, reader)
+
+			if err := <-errCh; err != nil {
+				t.Fatalf("handle shutdown: %v", err)
+			}
+			if first.Status != protocol.ShutdownStatusAccepted {
+				t.Fatalf("expected accepted first, got %s", first.Status)
+			}
+			if final.Status != protocol.ShutdownStatusSimulated || final.Message != "dry-run shutdown simulated" {
+				t.Fatalf("expected simulated ack, got %+v", final)
+			}
+			if executor.Calls() != 0 {
+				t.Fatalf("expected dry-run not to execute, got %d calls", executor.Calls())
+			}
+			if stored, _ := client.getCommandState("shutdown-dry"); stored.Status != protocol.ShutdownStatusSimulated {
+				t.Fatalf("expected stored simulated state, got %s", stored.Status)
+			}
+		})
+	}
+}
+
+func TestHandleShutdownReplayOfSimulatedCommandOnlyReAcks(t *testing.T) {
+	client := NewClient(config.SlaveConfig{NodeID: "node-1"})
+	executor := &fakeShutdownExecutor{}
+	client.shutdown = executor
+	client.setCommandState(client.ackMessage("shutdown-sim", protocol.ShutdownStatusSimulated, "dry-run shutdown simulated"))
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+	reader := bufio.NewReader(peer)
+	shutdown := protocol.Envelope{
+		Type: protocol.TypeShutdown,
+		Data: protocol.ShutdownMessage{CommandID: "shutdown-sim", IssuedAt: time.Now().UTC()},
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.handleEnvelope(shutdown, newConnectionSession(conn)) }()
+	replay := readShutdownUpdate(t, peer, reader)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("handle replay: %v", err)
+	}
+	if replay.Status != protocol.ShutdownStatusSimulated {
+		t.Fatalf("expected simulated re-ack, got %s", replay.Status)
+	}
+	if executor.Calls() != 0 {
+		t.Fatalf("expected replay not to execute, got %d calls", executor.Calls())
+	}
+}
+
+func TestMetricsServerBoundsRequestHeaderRead(t *testing.T) {
+	srv := newMetricsServer("127.0.0.1:0")
+
+	if srv.ReadHeaderTimeout != metricsReadHeaderTimeout || srv.ReadHeaderTimeout <= 0 {
+		t.Fatalf("ReadHeaderTimeout=%s want %s", srv.ReadHeaderTimeout, metricsReadHeaderTimeout)
+	}
+}

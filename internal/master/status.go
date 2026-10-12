@@ -11,6 +11,7 @@ func (s *Server) Status() protocol.StatusResponse {
 	s.commandMu.Lock()
 	activeCommandID := s.activeCommand
 	localShutdown := s.localShutdownStatusLocked()
+	episode := s.episode.status()
 	commandCopy := make(map[string]*shutdownCommandState, len(s.commands))
 	for commandID, state := range s.commands {
 		commandCopy[commandID] = state.clone()
@@ -63,6 +64,8 @@ func (s *Server) Status() protocol.StatusResponse {
 			node.Hostname = meta.Hostname
 			node.Tags = append([]string(nil), meta.Tags...)
 			node.Expected = meta.Expected
+			node.DryRun = meta.DryRun
+			node.ShutdownReady = meta.ShutdownReady
 			node.FirstSeen = meta.FirstSeen
 			node.LastSeen = meta.LastSeen
 		}
@@ -97,6 +100,7 @@ func (s *Server) Status() protocol.StatusResponse {
 	return protocol.StatusResponse{
 		ShutdownIssued: s.shutdownIssued.Load(),
 		ActiveCommand:  activeSummary,
+		Episode:        episode,
 		UPS:            upsStatus,
 		LocalShutdown:  localShutdown,
 		Nodes:          nodes,

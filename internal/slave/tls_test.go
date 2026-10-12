@@ -321,3 +321,46 @@ func writePEMFile(t *testing.T, dir, name string, content []byte) string {
 	}
 	return path
 }
+
+func TestClientDialTimesOutStalledTLSHandshake(t *testing.T) {
+	previous := dialTimeout
+	dialTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { dialTimeout = previous })
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	// Accept TCP but never speak TLS, so only a handshake deadline can unblock the client.
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+	client := NewClient(config.SlaveConfig{
+		MasterAddr: listener.Addr().String(),
+		TLS:        config.TLSConfig{Enabled: true, InsecureSkipVerify: true},
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := client.dial()
+		if conn != nil {
+			conn.Close()
+		}
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("expected handshake timeout error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("dial did not time out on a stalled TLS handshake")
+	}
+}

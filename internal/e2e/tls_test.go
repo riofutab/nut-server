@@ -39,6 +39,6 @@ func TestE2ETLSRegisterAndShutdown(t *testing.T) {
 	waitUntil(t, "tls shutdown completed", func() bool {
 		status := rm.Status(t)
 		node := nodeByID(status, "slave-tls")
-		return node != nil && node.LastShutdown != nil && node.LastShutdown.Status == protocol.ShutdownStatusExecuted
+		return node != nil && node.LastShutdown != nil && node.LastShutdown.Status == protocol.ShutdownStatusSimulated
 	})
 }

@@ -17,6 +17,7 @@ func TestSlaveMetricsEndpointExposesExpectedFamilies(t *testing.T) {
 	recordShutdownStatus("executing")
 	recordShutdownStatus("executed")
 	recordShutdownStatus("failed")
+	recordShutdownStatus("simulated")
 	setConnected(true)
 	t.Cleanup(func() { setConnected(false) })
 
@@ -40,6 +41,7 @@ func TestSlaveMetricsEndpointExposesExpectedFamilies(t *testing.T) {
 		`nut_slave_shutdown_status_total{status="executing"}`,
 		`nut_slave_shutdown_status_total{status="executed"}`,
 		`nut_slave_shutdown_status_total{status="failed"}`,
+		`nut_slave_shutdown_status_total{status="simulated"}`,
 		`nut_slave_connected 1`,
 	}
 	for _, want := range wantSubstrings {

@@ -127,3 +127,134 @@ shutdown_policies:
 		t.Errorf("missing target should default to All=true")
 	}
 }
+
+func TestLoadMasterConfigLegacyPolicyWithoutBatteryRequirementLeavesOnBatteryUnset(t *testing.T) {
+	path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policy:
+  require_on_battery: false
+  min_battery_charge: 25
+`)
+
+	cfg, err := LoadMasterConfig(path)
+
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.ShutdownPolicies[0].When.OnBattery; got != nil {
+		t.Fatalf("OnBattery=%v want nil (require_on_battery:false must not mean 'on mains')", *got)
+	}
+	if cfg.ShutdownPolicies[0].When.ChargeBelow != 25 {
+		t.Fatalf("ChargeBelow=%d want 25", cfg.ShutdownPolicies[0].When.ChargeBelow)
+	}
+}
+
+func TestLoadMasterConfigLegacyPolicyOnBatteryAloneIsValid(t *testing.T) {
+	path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policy:
+  require_on_battery: true
+`)
+
+	cfg, err := LoadMasterConfig(path)
+
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.ShutdownPolicies[0].When.OnBattery; got == nil || !*got {
+		t.Fatalf("OnBattery=%v want true", got)
+	}
+}
+
+func TestLoadMasterConfigWithoutAnyPolicyConditionFails(t *testing.T) {
+	cases := map[string]string{
+		"no policy at all": minimalMasterFields,
+		"legacy policy without conditions": minimalMasterFields + `
+shutdown_policy:
+  require_on_battery: false
+  shutdown_reason: "x"
+`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfigFile(t, content)
+
+			_, err := LoadMasterConfig(path)
+
+			if err == nil || !strings.Contains(err.Error(), "shutdown_policies") {
+				t.Fatalf("expected error pointing at shutdown_policies, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMasterConfigRejectsOnBatteryFalse(t *testing.T) {
+	path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policies:
+  - name: mains
+    when:
+      on_battery: false
+      charge_below: 50
+`)
+
+	_, err := LoadMasterConfig(path)
+
+	if err == nil || !strings.Contains(err.Error(), "on_battery") || !strings.Contains(err.Error(), "on battery") {
+		t.Fatalf("expected on_battery:false rejection, got %v", err)
+	}
+}
+
+func TestLoadMasterConfigAcceptsOnBatteryTrue(t *testing.T) {
+	path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policies:
+  - name: battery
+    when:
+      on_battery: true
+`)
+
+	if _, err := LoadMasterConfig(path); err != nil {
+		t.Fatalf("expected on_battery:true to be valid, got %v", err)
+	}
+}
+
+func TestLoadMasterConfigSNMPVersion(t *testing.T) {
+	cases := []struct {
+		name        string
+		version     string
+		wantVersion string
+		wantErr     string
+	}{
+		{name: "empty defaults to 2c", version: `""`, wantVersion: "2c"},
+		{name: "v1", version: `"1"`, wantVersion: "1"},
+		{name: "v2c", version: `"2c"`, wantVersion: "2c"},
+		{name: "v3 not supported", version: `"3"`, wantErr: "SNMPv3 is not supported yet"},
+		{name: "unknown", version: `"2"`, wantErr: "snmp.version"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFile(t, `
+admin_token: "admin-secret"
+auth_tokens:
+  - "secret-token"
+snmp:
+  target: "127.0.0.1"
+  version: `+tc.version+`
+shutdown_policy:
+  require_on_battery: true
+`)
+
+			cfg, err := LoadMasterConfig(path)
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.SNMP.Version != tc.wantVersion {
+				t.Fatalf("version=%q want %q", cfg.SNMP.Version, tc.wantVersion)
+			}
+		})
+	}
+}

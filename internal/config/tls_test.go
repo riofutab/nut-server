@@ -35,6 +35,8 @@ func TestLoadMasterConfigWithTLS(t *testing.T) {
 		"  require_client_cert: true",
 		"snmp:",
 		"  target: \"192.168.1.10\"",
+		"shutdown_policy:",
+		"  min_battery_charge: 30",
 	}, "\n") + "\n"
 	if err := os.WriteFile(configFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -165,6 +167,20 @@ func TestTLSConfigValidateServer(t *testing.T) {
 			name:    "mtls without ca",
 			cfg:     TLSConfig{Enabled: true, CertFile: "server.crt", KeyFile: "server.key", RequireClientCert: true},
 			wantErr: "tls.ca_file must not be empty",
+		},
+		{
+			name:    "bind node id without client cert",
+			cfg:     TLSConfig{Enabled: true, CertFile: "server.crt", KeyFile: "server.key", BindNodeIDToCert: true},
+			wantErr: "tls.bind_node_id_to_cert requires tls.require_client_cert",
+		},
+		{
+			name:    "ca file without client cert",
+			cfg:     TLSConfig{Enabled: true, CertFile: "server.crt", KeyFile: "server.key", CAFile: "ca.crt"},
+			wantErr: "tls.ca_file requires tls.require_client_cert",
+		},
+		{
+			name: "bind node id with client cert",
+			cfg:  TLSConfig{Enabled: true, CertFile: "server.crt", KeyFile: "server.key", CAFile: "ca.crt", RequireClientCert: true, BindNodeIDToCert: true},
 		},
 		{
 			name: "valid server tls",
@@ -366,4 +382,19 @@ func generateSignedCertificate(t *testing.T, caCertPEM []byte, caKey *rsa.Privat
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(leafKey)})
 	return certPEM, keyPEM
+}
+
+func TestLoadMasterConfigRejectsBindNodeIDWithoutClientCert(t *testing.T) {
+	path := writeConfigFile(t, minimalMasterFields+`
+shutdown_policy:
+  require_on_battery: true
+tls:
+  bind_node_id_to_cert: true
+`)
+
+	_, err := LoadMasterConfig(path)
+
+	if err == nil || !strings.Contains(err.Error(), "tls.bind_node_id_to_cert") {
+		t.Fatalf("expected bind_node_id_to_cert rejection, got %v", err)
+	}
 }

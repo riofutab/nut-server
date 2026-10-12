@@ -24,6 +24,8 @@ v0.2.0 起 slave 不再以 root 运行，systemd unit 用 `User=nut-server`。�
 
 如果你的发行版 `shutdown` 路径不同（比如 `/usr/sbin/shutdown`），改 `/etc/nut-server/slave.yaml` 的 `shutdown_command` 即可，sudoers 模板已经覆盖常见路径。
 
+v0.5.2 起 slave（非 dry-run）启动时会用 `sudo -n -l` 检查关机命令能否执行，结果写进日志（`shutdown command self-check passed` / `failed`）、指标 `nut_slave_shutdown_ready`，并在注册时报告给 master。检查失败不会退出进程。systemd unit 刻意没有使用 `NoNewPrivileges`、`LockPersonality`、`RestrictAddressFamilies` 等选项，它们会隐式禁止 sudo 提权。
+
 ## 离线安装
 
 ```bash

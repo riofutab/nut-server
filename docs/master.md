@@ -53,6 +53,8 @@ local_shutdown:
 
 master 会等远端节点完成（或超时、或紧急阈值触发）后关本机，不需要在 master 上再装一个 slave。`/status` 的 `local_shutdown` 字段会暴露当前阶段。
 
+只有目标为全部节点的命令会启动这个流程；只关部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes` 时，即使还没有任何策略触发，master 也会关本机。命令带 `dry_run` 时本机关机同样只模拟。市电恢复会取消尚未开始的本机关机；执行失败每 30s 重试一次。
+
 ## 管理接口
 
 默认监听 `127.0.0.1:9001`，所有请求都需要 `Authorization: Bearer <admin_token>`：

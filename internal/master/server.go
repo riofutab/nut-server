@@ -14,27 +14,44 @@ import (
 
 	"nut-server/internal/config"
 	"nut-server/internal/protocol"
+	"nut-server/internal/shutdowncheck"
 )
 
 //go:embed web/index.html
 var webFS embed.FS
 
+// Accept retry backoff for transient listener errors (e.g. EMFILE), mirroring
+// net/http.Server: a resource blip must not take the master down mid-outage.
+const (
+	minAcceptRetryDelay = 5 * time.Millisecond
+	maxAcceptRetryDelay = 1 * time.Second
+)
+
 type Server struct {
-	cfg                 config.MasterConfig
-	registry            *Registry
-	directory           *NodeDirectory
-	commandSeq          atomic.Uint64
-	shutdownIssued      atomic.Bool
-	ready               atomic.Bool
+	cfg            config.MasterConfig
+	registry       *Registry
+	directory      *NodeDirectory
+	shutdownIssued atomic.Bool
+	ready          atomic.Bool
+	// upsConfirmed is set by the first successful UPS poll of this process.
+	// Auto shutdown activity restored from the state file waits for it.
+	upsConfirmed        atomic.Bool
 	commandMu           sync.Mutex
 	commands            map[string]*shutdownCommandState
 	activeCommand       string
-	autoShutdownLatched bool
+	episode             *autoEpisode
+	lastNodeRetryAt     time.Time
 	localShutdown       *localShutdownState
-	localShutdownRunner func([]string, string) error
-	upsMu               sync.RWMutex
-	upsStatus           *protocol.UPSStatusView
-	tlsConfig           *tls.Config
+	localShutdownRunner func(command []string, trigger string, dryRun bool) error
+	upsReader           func(config.SNMPConfig) (UPSStatus, error)
+	checkShutdown       func(ctx context.Context, argv []string) error
+	// localCommandReady is the startup self-check result of the local shutdown
+	// command (nil = not checked). Written in Run before the admin server
+	// starts, read-only afterwards.
+	localCommandReady *bool
+	upsMu             sync.RWMutex
+	upsStatus         *protocol.UPSStatusView
+	tlsConfig         *tls.Config
 	// State persistence. persistSeq is bumped under commandMu when a snapshot is
 	// taken; the disk write runs under persistMu (NOT commandMu) so the fsync no
 	// longer blocks readers or the command-watcher tick. persistedSeq guards
@@ -56,6 +73,10 @@ type shutdownCommandState struct {
 	TimeoutAt      *time.Time
 	CompletedAt    *time.Time
 	ReplayDisabled bool `json:"replay_disabled,omitempty"`
+	// Auto marks the episode command created by shutdown policies. Unlike a
+	// manual command it stays active until line power returns, so failed nodes
+	// keep being retried and later policies can widen it.
+	Auto bool `json:"auto,omitempty"`
 }
 
 type localShutdownState struct {
@@ -66,6 +87,10 @@ type localShutdownState struct {
 	Trigger           string     `json:"trigger,omitempty"`
 	LastRebroadcastAt *time.Time `json:"last_rebroadcast_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
+	LastAttemptAt     *time.Time `json:"last_attempt_at,omitempty"`
+	// DryRun follows the command that armed the local shutdown, so a dry-run
+	// command never powers off the master even when the config is not dry-run.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 func NewServer(cfg config.MasterConfig) *Server {
@@ -77,6 +102,10 @@ func NewServer(cfg config.MasterConfig) *Server {
 		conns:     make(map[net.Conn]struct{}),
 	}
 	server.localShutdownRunner = server.runLocalShutdownCommand
+	server.upsReader = ReadUPSStatus
+	server.checkShutdown = func(ctx context.Context, argv []string) error {
+		return shutdowncheck.Check(ctx, argv, nil)
+	}
 	if cfg.SNMP.Target != "" {
 		server.upsStatus = &protocol.UPSStatusView{Target: cfg.SNMP.Target}
 	}
@@ -99,6 +128,7 @@ func (s *Server) listen() (net.Listener, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	s.runLocalShutdownSelfCheck(ctx)
 	listener, err := s.listen()
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.cfg.ListenAddr, err)
@@ -124,6 +154,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); s.runCommandWatcher(ctx) }()
 
 	var connWG sync.WaitGroup
+	var acceptDelay time.Duration
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -137,8 +168,15 @@ func (s *Server) Run(ctx context.Context) error {
 				wg.Wait()
 				return nil
 			}
-			return fmt.Errorf("accept connection: %w", err)
+			acceptDelay = nextAcceptRetryDelay(acceptDelay)
+			slog.Error("accept connection failed, retrying", "err", err, "delay", acceptDelay)
+			select {
+			case <-ctx.Done():
+			case <-time.After(acceptDelay):
+			}
+			continue
 		}
+		acceptDelay = 0
 		s.trackConn(conn)
 		connWG.Add(1)
 		go func(c net.Conn) {
@@ -147,4 +185,29 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handleConn(c)
 		}(conn)
 	}
+}
+
+func nextAcceptRetryDelay(current time.Duration) time.Duration {
+	if current == 0 {
+		return minAcceptRetryDelay
+	}
+	return min(current*2, maxAcceptRetryDelay)
+}
+
+// runLocalShutdownSelfCheck verifies the local shutdown command could run when
+// the master may have to power itself off. A failure is reported (log and
+// /status), never fatal: exiting would let systemd restart-loop the master and
+// stop it from shutting down the slaves.
+func (s *Server) runLocalShutdownSelfCheck(ctx context.Context) {
+	if !s.cfg.LocalShutdown.Enabled || s.cfg.DryRun {
+		return
+	}
+	ready := true
+	if err := s.checkShutdown(ctx, s.cfg.LocalShutdown.Command); err != nil {
+		ready = false
+		slog.Error("shutdown command self-check failed", "err", err, "command", s.cfg.LocalShutdown.Command)
+	} else {
+		slog.Info("shutdown command self-check passed", "command", s.cfg.LocalShutdown.Command)
+	}
+	s.localCommandReady = &ready
 }

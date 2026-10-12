@@ -29,6 +29,9 @@ shutdown_policy:
 # shutdown_policies: 多策略组合。任一 policy 命中即触发;命中多条时 target 取并集
 # (任一 all:true 则关全部;否则 tags / node_ids 并集)。reason 拼接成 'a; b'。
 # 留空时自动用上面的 shutdown_policy 合成一条 'default' policy,旧配置无需改动。
+# 策略只在 UPS 走电池时评估。同一次断电里,后命中的策略并入同一条命令,
+# 下面的例子会先关 dev 节点,续航低于 5 分钟时再关全部。
+# when.on_battery 只能写 true,写 false 会启动失败。
 # shutdown_policies:
 #   - name: dev-early
 #     when:
@@ -43,6 +46,8 @@ shutdown_policy:
 #     target:
 #       all: true
 #     reason: "runtime critical"
+# local_shutdown: 只有目标为全部节点的命令会触发 master 本机关机;断电期间
+# 续航低于 emergency_runtime_minutes 时无论如何都会关。市电恢复会取消尚未开始的本机关机。
 local_shutdown:
   enabled: false
   # master 以非 root 的 nut-server 用户运行,需经 sudo 关机(包内随附

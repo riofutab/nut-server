@@ -167,24 +167,24 @@ func TestEvaluatePoliciesNoMatchReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestPolicyMatchToRequestAllOmitsTagsAndNodes(t *testing.T) {
+func TestPolicyMatchTargetAllOmitsTagsAndNodes(t *testing.T) {
 	m := PolicyMatch{Reason: "r", All: true, Tags: []string{"web"}, NodeIDs: []string{"db"}}
-	req := m.ToRequest()
-	if len(req.Tags) != 0 || len(req.NodeIDs) != 0 {
-		t.Fatalf("All=true should drop tags/node_ids; got %+v", req)
-	}
-	if req.Reason != "r" {
-		t.Fatalf("reason=%q", req.Reason)
+	target := m.Target()
+	if !target.All || len(target.Tags) != 0 || len(target.NodeIDs) != 0 {
+		t.Fatalf("All=true should drop tags/node_ids; got %+v", target)
 	}
 }
 
-func TestPolicyMatchToRequestScopedKeepsFilters(t *testing.T) {
+func TestPolicyMatchTargetScopedKeepsFilters(t *testing.T) {
 	m := PolicyMatch{Reason: "r", Tags: []string{"web"}, NodeIDs: []string{"db"}}
-	req := m.ToRequest()
-	if !reflect.DeepEqual(req.Tags, []string{"web"}) {
-		t.Fatalf("tags=%v", req.Tags)
+	target := m.Target()
+	if target.All {
+		t.Fatal("scoped match must not target all")
 	}
-	if !reflect.DeepEqual(req.NodeIDs, []string{"db"}) {
-		t.Fatalf("node_ids=%v", req.NodeIDs)
+	if !reflect.DeepEqual(target.Tags, []string{"web"}) {
+		t.Fatalf("tags=%v", target.Tags)
+	}
+	if !reflect.DeepEqual(target.NodeIDs, []string{"db"}) {
+		t.Fatalf("node_ids=%v", target.NodeIDs)
 	}
 }

@@ -15,6 +15,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 tls:
   enabled: true
   cert_file: "server.crt"
@@ -65,6 +67,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 tls:
   enabled: true
   disabled: true
@@ -85,6 +89,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 tls:
   disabled: true
 `)
@@ -106,6 +112,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 `)
 
 	cfg, err := LoadMasterConfig(configPath)
@@ -126,6 +134,8 @@ auth_tokens:
 log_ups_status: true
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 `)
 
 	cfg, err := LoadMasterConfig(configPath)
@@ -145,6 +155,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 `)
 
 	cfg, err := LoadMasterConfig(configPath)
@@ -183,6 +195,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 local_shutdown:
   enabled: true
   command: []
@@ -198,6 +212,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 local_shutdown:
   enabled: true
   max_wait: "0s"
@@ -213,6 +229,8 @@ auth_tokens:
   - "secret-token"
 snmp:
   target: "127.0.0.1"
+shutdown_policy:
+  min_battery_charge: 30
 local_shutdown:
   enabled: true
   emergency_runtime_minutes: 0

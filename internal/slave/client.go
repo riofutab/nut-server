@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"nut-server/internal/config"
 	"nut-server/internal/protocol"
+	"nut-server/internal/shutdowncheck"
 )
 
 const (
@@ -31,12 +33,25 @@ const (
 	// every ping, so missing reads for longer than this means the link is dead.
 	// Must exceed pingInterval so a healthy connection never times out.
 	readIdleTimeout = 3 * pingInterval
+	// defaultDialTimeout bounds TCP connect plus TLS handshake, so a master
+	// that accepts but never completes the handshake cannot stall reconnects.
+	defaultDialTimeout       = 10 * time.Second
+	metricsReadHeaderTimeout = 10 * time.Second
+	// maxRetainedCommandStates matches the master's maxRetainedCompletedCommands
+	// so every command the master may still replay keeps its slave-side state.
+	maxRetainedCommandStates = 200
 )
+
+// dialTimeout is a variable only so tests can shorten it.
+var dialTimeout = defaultDialTimeout
 
 type Client struct {
 	cfg           config.SlaveConfig
 	hostname      string
 	shutdown      ShutdownExecutor
+	checkShutdown func(ctx context.Context, argv []string) error
+	// shutdownReady is the startup self-check result; nil when skipped (dry-run).
+	shutdownReady *bool
 	commandMu     sync.Mutex
 	commandStates map[string]protocol.ShutdownAckMessage
 	executions    map[string]*shutdownExecution
@@ -65,6 +80,7 @@ func NewClient(cfg config.SlaveConfig) *Client {
 		cfg:           cfg,
 		hostname:      hostname,
 		shutdown:      CommandShutdownExecutor{Command: cfg.ShutdownCommand, DryRun: cfg.DryRun},
+		checkShutdown: defaultShutdownCheck,
 		commandStates: make(map[string]protocol.ShutdownAckMessage),
 		executions:    make(map[string]*shutdownExecution),
 	}
@@ -72,7 +88,12 @@ func NewClient(cfg config.SlaveConfig) *Client {
 	return client
 }
 
+func defaultShutdownCheck(ctx context.Context, argv []string) error {
+	return shutdowncheck.Check(ctx, argv, nil)
+}
+
 func (c *Client) Run(ctx context.Context) error {
+	c.runShutdownSelfCheck(ctx)
 	if c.cfg.MetricsListenAddr != "" {
 		go c.runMetricsServer(ctx)
 	}
@@ -96,7 +117,39 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
+// runShutdownSelfCheck verifies the shutdown command could run. A failure is
+// only reported (log, metric, register message), never fatal: exiting would let
+// systemd restart-loop the slave and hide the problem.
+func (c *Client) runShutdownSelfCheck(ctx context.Context) {
+	if c.cfg.DryRun {
+		return
+	}
+	ready := true
+	if err := c.checkShutdown(ctx, c.cfg.ShutdownCommand); err != nil {
+		ready = false
+		slog.Error("shutdown command self-check failed", "err", err, "command", c.cfg.ShutdownCommand)
+	} else {
+		slog.Info("shutdown command self-check passed", "command", c.cfg.ShutdownCommand)
+	}
+	c.shutdownReady = &ready
+	setShutdownReady(ready)
+}
+
 func (c *Client) runMetricsServer(ctx context.Context) {
+	srv := newMetricsServer(c.cfg.MetricsListenAddr)
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	slog.Info("metrics server starting", "addr", c.cfg.MetricsListenAddr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("metrics server stopped", "err", err)
+	}
+}
+
+func newMetricsServer(addr string) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(slavePromRegistry(), promhttp.HandlerOpts{}))
 	// Liveness: process is up. Readiness: the slave currently holds a registered
@@ -111,17 +164,7 @@ func (c *Client) runMetricsServer(ctx context.Context) {
 		}
 		writePlain(w, http.StatusServiceUnavailable, "not ready")
 	})
-	srv := &http.Server{Addr: c.cfg.MetricsListenAddr, Handler: mux}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-	slog.Info("metrics server starting", "addr", c.cfg.MetricsListenAddr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("metrics server stopped", "err", err)
-	}
+	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: metricsReadHeaderTimeout}
 }
 
 func writePlain(w http.ResponseWriter, status int, body string) {
@@ -166,8 +209,9 @@ func jitterDuration(d time.Duration) time.Duration {
 }
 
 func (c *Client) dial() (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: dialTimeout}
 	if !c.cfg.TLS.EnabledForClient() {
-		return net.Dial("tcp", c.cfg.MasterAddr)
+		return dialer.Dial("tcp", c.cfg.MasterAddr)
 	}
 	if c.tlsConfig == nil {
 		tlsConfig, err := c.cfg.TLS.ClientTLSConfig()
@@ -176,7 +220,9 @@ func (c *Client) dial() (net.Conn, error) {
 		}
 		c.tlsConfig = tlsConfig
 	}
-	return tls.Dial("tcp", c.cfg.MasterAddr, c.tlsConfig)
+	// tls.Dialer applies NetDialer.Timeout to the handshake as well as the connect.
+	tlsDialer := &tls.Dialer{NetDialer: dialer, Config: c.tlsConfig}
+	return tlsDialer.Dial("tcp", c.cfg.MasterAddr)
 }
 
 func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
@@ -190,10 +236,12 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 	session := newConnectionSession(conn)
 
 	if err := session.Send(protocol.TypeRegister, protocol.RegisterMessage{
-		NodeID:   c.cfg.NodeID,
-		Hostname: c.hostname,
-		Token:    c.cfg.Token,
-		Tags:     c.cfg.Tags,
+		NodeID:        c.cfg.NodeID,
+		Hostname:      c.hostname,
+		Token:         c.cfg.Token,
+		Tags:          c.cfg.Tags,
+		DryRun:        c.cfg.DryRun,
+		ShutdownReady: c.shutdownReady,
 	}); err != nil {
 		recordConnectAttempt("register_error")
 		return fmt.Errorf("send register: %w", err)
@@ -322,10 +370,10 @@ func (c *Client) resumeShutdown(shutdown protocol.ShutdownMessage, session *conn
 			"command_id", shutdown.CommandID,
 			"node_id", c.cfg.NodeID,
 			"reason", shutdown.Reason)
-		executed := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusExecuted, "dry-run shutdown simulated")
-		c.setCommandState(executed)
-		recordShutdownStatus(executed.Status)
-		return session.Send(protocol.TypeShutdownAck, executed)
+		simulated := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusSimulated, "dry-run shutdown simulated")
+		c.setCommandState(simulated)
+		recordShutdownStatus(simulated.Status)
+		return session.Send(protocol.TypeShutdownAck, simulated)
 	}
 
 	executing := c.ackMessage(shutdown.CommandID, protocol.ShutdownStatusExecuting, "executing shutdown command")
@@ -398,9 +446,32 @@ func (c *Client) getCommandState(commandID string) (protocol.ShutdownAckMessage,
 func (c *Client) setCommandState(update protocol.ShutdownAckMessage) {
 	c.commandMu.Lock()
 	c.commandStates[update.CommandID] = update
+	c.pruneCommandStatesLocked()
 	seq, content := c.snapshotStateLocked()
 	c.commandMu.Unlock()
 	c.persistState(seq, content)
+}
+
+// pruneCommandStatesLocked drops the oldest states (by AckedAt) beyond
+// maxRetainedCommandStates. Commands with an in-flight execution are never
+// dropped, so their final ack still has a state to update.
+func (c *Client) pruneCommandStatesLocked() {
+	excess := len(c.commandStates) - maxRetainedCommandStates
+	if excess <= 0 {
+		return
+	}
+	candidates := make([]string, 0, len(c.commandStates))
+	for id := range c.commandStates {
+		if _, running := c.executions[id]; !running {
+			candidates = append(candidates, id)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return c.commandStates[candidates[i]].AckedAt.Before(c.commandStates[candidates[j]].AckedAt)
+	})
+	for i := 0; i < excess && i < len(candidates); i++ {
+		delete(c.commandStates, candidates[i])
+	}
 }
 
 func (c *Client) beginOrRebindShutdownExecution(commandID string, session *connectionSession) bool {

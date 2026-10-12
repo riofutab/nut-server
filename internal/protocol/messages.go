@@ -18,6 +18,10 @@ const (
 	ShutdownStatusExecuted  = "executed"
 	ShutdownStatusFailed    = "failed"
 	ShutdownStatusTimeout   = "timeout"
+	// ShutdownStatusSimulated is reported instead of executed when the slave
+	// handled the command in dry-run mode, so the master never mistakes a
+	// simulated shutdown for a real one.
+	ShutdownStatusSimulated = "simulated"
 )
 
 type Envelope struct {
@@ -30,6 +34,10 @@ type RegisterMessage struct {
 	Hostname string   `json:"hostname"`
 	Token    string   `json:"token"`
 	Tags     []string `json:"tags,omitempty"`
+	DryRun   bool     `json:"dry_run,omitempty"`
+	// ShutdownReady is the slave's startup self-check of its shutdown command
+	// (nil when the check was skipped, e.g. in dry-run).
+	ShutdownReady *bool `json:"shutdown_ready,omitempty"`
 }
 
 type RegisterAckMessage struct {
@@ -90,6 +98,7 @@ type CommandSummary struct {
 	Acknowledged    int                  `json:"acknowledged"`
 	Executing       int                  `json:"executing"`
 	Executed        int                  `json:"executed"`
+	Simulated       int                  `json:"simulated"`
 	Failed          int                  `json:"failed"`
 	Timeout         int                  `json:"timeout"`
 	Outstanding     int                  `json:"outstanding"`
@@ -99,15 +108,17 @@ type CommandSummary struct {
 }
 
 type NodeStatus struct {
-	NodeID       string              `json:"node_id"`
-	Hostname     string              `json:"hostname"`
-	Tags         []string            `json:"tags,omitempty"`
-	State        string              `json:"state"`
-	Expected     bool                `json:"expected,omitempty"`
-	Connected    bool                `json:"connected"`
-	FirstSeen    *time.Time          `json:"first_seen,omitempty"`
-	LastSeen     *time.Time          `json:"last_seen,omitempty"`
-	LastShutdown *ShutdownAckMessage `json:"last_shutdown,omitempty"`
+	NodeID        string              `json:"node_id"`
+	Hostname      string              `json:"hostname"`
+	Tags          []string            `json:"tags,omitempty"`
+	State         string              `json:"state"`
+	Expected      bool                `json:"expected,omitempty"`
+	DryRun        bool                `json:"dry_run,omitempty"`
+	ShutdownReady *bool               `json:"shutdown_ready,omitempty"`
+	Connected     bool                `json:"connected"`
+	FirstSeen     *time.Time          `json:"first_seen,omitempty"`
+	LastSeen      *time.Time          `json:"last_seen,omitempty"`
+	LastShutdown  *ShutdownAckMessage `json:"last_shutdown,omitempty"`
 }
 
 const (
@@ -151,11 +162,22 @@ type LocalShutdownStatus struct {
 	Trigger           string     `json:"trigger,omitempty"`
 	LastRebroadcastAt *time.Time `json:"last_rebroadcast_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
+	// CommandReady is the startup self-check of the local shutdown command
+	// (absent when not checked, e.g. dry-run).
+	CommandReady *bool `json:"command_ready,omitempty"`
+}
+
+// EpisodeStatus describes the current on-battery period, if any.
+type EpisodeStatus struct {
+	StartedAt     time.Time `json:"started_at"`
+	CommandID     string    `json:"command_id,omitempty"`
+	FiredPolicies []string  `json:"fired_policies,omitempty"`
 }
 
 type StatusResponse struct {
 	ShutdownIssued bool                 `json:"shutdown_issued"`
 	ActiveCommand  *CommandSummary      `json:"active_command,omitempty"`
+	Episode        *EpisodeStatus       `json:"episode,omitempty"`
 	UPS            *UPSStatusView       `json:"ups,omitempty"`
 	LocalShutdown  *LocalShutdownStatus `json:"local_shutdown,omitempty"`
 	Nodes          []NodeStatus         `json:"nodes"`

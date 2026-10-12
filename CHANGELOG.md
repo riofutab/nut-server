@@ -6,7 +6,34 @@
 
 ## [Unreleased]
 
-尚无未发布改动。
+计划发布为 v0.5.2。修复一批会导致漏关、误关或关机失败的问题。**升级顺序:先 master 后 slave**;配置校验有收紧,详见 [docs/upgrade.md](docs/upgrade.md)。
+
+### Fixed
+- **按随包部署时真实关机必然失败**:systemd unit 显式或隐式开启 NoNewPrivileges,使 sudo 无法提权;sudoers 带参数条目末尾的 `""` 让规则永远匹配不上。两处都已修正,tar.gz 升级脚本现在也会替换 sudoers。
+- **多策略不能逐级触发**:原先一次断电只执行第一条命中的策略。现引入断电周期(episode):后命中的策略并入同一条命令(同一个 command_id),目标只增不减。
+- **旧配置 `require_on_battery: false` 语义反转**:原先被当成「必须市电供电」;两种策略都不写时,master 启动后会在市电下关掉所有 slave。现在等同不限制,且没有任何条件时启动报错。
+- **任何命令都会触发 master 本机关机**:现在只有目标为全部节点的命令才会;命令带 `dry_run` 时本机关机只模拟,不再只看配置文件。
+- **没有在线 slave 时 master 不关自己**:自动触发现在照常建命令,到 `max_wait` 或紧急续航时关 master;紧急续航在断电期间独立生效,不依赖任何命令。
+- **失败节点不重试**:断电期间每 30s 对 `failed` / `timeout` 节点重发;重试成功的 `executed` 能覆盖之前的 `failed`。本机关机失败也每 30s 重试。
+- **按 tag / node_id 下发的命令不收编重连节点**:匹配目标的节点重连后会被纳入并重放。
+- **命令 ID 可能重复**:原先是持久化计数器,state 文件丢失后从 1 重来,slave 会把新命令当成历史命令只回 ack。现在 ID 带时间戳和随机后缀。
+- **SNMP 异常值被当作 0**:检查 PDU 错误状态,只接受整数类型的值。
+- **市电下反复关机**:策略只在 UPS 走电池时评估,来电后电池充电期间不再关掉重新开机的节点。
+- master 重启后,恢复的断电周期要等第一次 UPS 读数后才重放或执行本机关机,避免来电开机后又被关掉。
+- 市电恢复会取消尚未开始的本机关机。
+- slave 拨号与 TLS 握手加 10s 超时;master 遇到临时的 Accept 错误退避重试,不再退出进程。
+
+### Changed
+- dry-run 下 slave 回报新状态 `simulated`,不再回 `executed`;命令摘要新增 `simulated` 计数。
+- slave 注册时报告 `dry_run` 与关机权限自检结果 `shutdown_ready`,`/status` 与状态页显示。
+- master 与 slave 启动时自检关机命令能否执行(sudo 命令用 `sudo -n -l`),结果写日志、`nut_slave_shutdown_ready` 指标与 `/status` 的 `local_shutdown.command_ready`;失败不退出进程。
+- `/status` 新增 `episode`(断电开始时间、已触发策略);`POST /commands/reset` 同时结束当前断电周期。
+- 断电期间策略触发会取代仍在进行的手动命令。
+- 配置校验收紧:`when.on_battery: false`、`snmp.version: "3"`、master 端未开 `require_client_cert` 却设了 `ca_file` / `bind_node_id_to_cert`、没有任何策略条件,均启动报错。
+- slave 已处理命令的记录上限 200 条。
+- 安装与升级把 `/etc/nut-server` 设为 `root:nut-server` 0750、配置 0640,服务进程不能改写自己的 token。
+- admin HTTP 加 `ReadHeaderTimeout` 与 64 KiB 请求体上限;`timeout_seconds` 上限 24h。
+- Go 1.26;CI action 固定到 commit SHA,release 前跑完整测试,nfpm 下载校验 SHA256;新增在真实 systemd 上验证 unit + sudoers 的打包冒烟测试。
 
 ## [0.5.1] - 2026-07-08
 

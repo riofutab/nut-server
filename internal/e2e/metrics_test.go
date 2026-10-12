@@ -26,7 +26,7 @@ func TestE2EMetricsReflectsClosedLoop(t *testing.T) {
 
 	preBody := rm.FetchMetrics(t)
 	preIssued := parseCounter(t, preBody, `nut_master_shutdowns_issued_total\s+([0-9.e+]+)`)
-	preExecuted := parseCounter(t, preBody, `nut_master_shutdown_acks_total\{status="executed"\}\s+([0-9.e+]+)`)
+	preSimulated := parseCounter(t, preBody, `nut_master_shutdown_acks_total\{status="simulated"\}\s+([0-9.e+]+)`)
 	preAccepted := parseCounter(t, preBody, `nut_master_register_attempts_total\{result="accepted"\}\s+([0-9.e+]+)`)
 
 	if preAccepted < 1 {
@@ -39,7 +39,7 @@ func TestE2EMetricsReflectsClosedLoop(t *testing.T) {
 	waitUntil(t, "shutdown completed", func() bool {
 		status := rm.Status(t)
 		node := nodeByID(status, "slave-metrics")
-		return node != nil && node.LastShutdown != nil && node.LastShutdown.Status == protocol.ShutdownStatusExecuted
+		return node != nil && node.LastShutdown != nil && node.LastShutdown.Status == protocol.ShutdownStatusSimulated
 	})
 
 	body := rm.FetchMetrics(t)
@@ -56,12 +56,12 @@ func TestE2EMetricsReflectsClosedLoop(t *testing.T) {
 	}
 
 	issued := parseCounter(t, body, `nut_master_shutdowns_issued_total\s+([0-9.e+]+)`)
-	executed := parseCounter(t, body, `nut_master_shutdown_acks_total\{status="executed"\}\s+([0-9.e+]+)`)
+	simulated := parseCounter(t, body, `nut_master_shutdown_acks_total\{status="simulated"\}\s+([0-9.e+]+)`)
 	if issued <= preIssued {
 		t.Errorf("shutdowns_issued_total did not advance: pre=%f post=%f", preIssued, issued)
 	}
-	if executed <= preExecuted {
-		t.Errorf("shutdown_acks_total{executed} did not advance: pre=%f post=%f", preExecuted, executed)
+	if simulated <= preSimulated {
+		t.Errorf("shutdown_acks_total{simulated} did not advance: pre=%f post=%f", preSimulated, simulated)
 	}
 }
 

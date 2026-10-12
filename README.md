@@ -75,7 +75,8 @@ UPS 读取默认按 UPS-MIB:`output_source_oid` 判断是否切到电池供电 �
 
 ### UPS 与关机决策
 - **SNMP UPS 轮询**: UPS-MIB 默认 OID, 可选 `log_ups_status: true` 把成功轮询也写 journal
-- **多策略组合关机条件** (v0.3.0+): `shutdown_policies` 列表, 内部 AND / 多条 OR, target 取并集, reason 拼接;`when.on_battery` 三态对称
+- **多策略组合关机条件** (v0.3.0+): `shutdown_policies` 列表, 内部 AND / 多条 OR, target 取并集, reason 拼接
+- **断电周期 (episode)** (v0.5.2+): 策略只在 UPS 走电池时评估;同一次断电里后命中的策略并入同一条命令(先关 dev、续航低时再关全部),失败节点每 30s 重试,市电恢复后结束
 - **关机编排**: 按 `node_id` / `tag` / `all` 定向下发, `command_timeout` 强制超时, 状态文件恢复
 - **master 本机关机**: 远端节点完成后再关本机, `max_wait` 兜底 + `emergency_runtime_minutes` 紧急阈值
 
@@ -191,12 +192,12 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `tls.key_file`: master 私钥文件路径
 - `tls.ca_file`: mTLS 时用于校验客户端证书的 CA 文件
 - `tls.require_client_cert`: 是否要求 slave 提供并校验客户端证书
-- `shutdown_policy.require_on_battery`: 是否要求 UPS 处于电池供电
+- `shutdown_policy.require_on_battery`: 是否要求 UPS 处于电池供电（策略本来就只在电池供电时评估；`true` 且阈值都为 0 表示一断电就关）
 - `shutdown_policy.min_battery_charge`: 最低电量阈值
 - `shutdown_policy.min_runtime_minutes`: 最低剩余运行时间阈值（单位：分钟）
 - `shutdown_policies`(v0.3.0+, 可选): 多策略组合。每条 policy 内部 AND, 多条 OR。命中多条时 target 取并集 (任一 `all:true` 则关全部; 否则 tags/node_ids 并集), reason 拼接成 `a; b`。留空时按 `shutdown_policy` 自动合成一条 `default` policy。字段:
   - `name` (必填, 唯一)
-  - `when.on_battery` / `when.charge_below` / `when.runtime_below` (至少一项)
+  - `when.on_battery` / `when.charge_below` / `when.runtime_below` (至少一项;`on_battery` 只能写 `true`,写 `false` 会启动失败)
   - `target.all` / `target.tags` / `target.node_ids` (全空 → 默认 `all:true`)
   - `reason` (可选, 缺省自动生成)
 - `snmp.output_source_oid`: 用于判断 UPS 当前输出来源，`5` 视为 battery
@@ -216,7 +217,7 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `state_file`: slave 本地状态文件，保存已处理的 command_id，防止重启后重复执行
 - `metrics_listen_addr`（v0.3.0+，可选）：留空则不暴露;设为回环地址(例如 `127.0.0.1:9101`)启用 `/metrics`,**不鉴权**
 - `reconnect_interval`: 断线重连间隔
-- `dry_run`: true 时收到 shutdown 只记录日志并回 ACK
+- `dry_run`: true 时收到 shutdown 只记录日志并回 `simulated` ACK
 - `tls.enabled`: 是否启用 TLS 拨号
 - `tls.disabled`: 强制关闭 TLS，并忽略其它 TLS 证书字段
 - `tls.cert_file`: slave 客户端证书文件路径，可用于 mTLS
@@ -270,8 +271,10 @@ dry_run: true
 效果：
 
 - master 仍会广播 shutdown 指令
-- slave 仍会回传 shutdown ACK（`status: executed`，`message: dry-run shutdown simulated`）
+- slave 回传 shutdown ACK（`status: simulated`，`message: dry-run shutdown simulated`），与真实执行的 `executed` 区分开
 - slave 不会真正执行 `shutdown_command`
+- 命令带 `dry_run` 时，master 的本机关机也只模拟，与配置文件里的 `dry_run` 无关
+- slave 注册时会报告自己是否 dry-run，`/status` 和状态页会标出来
 
 ## 状态恢复
 
@@ -308,7 +311,7 @@ dry_run: true
 - 二进制：`/usr/local/bin/nut-master`、`/usr/local/bin/nut-slave`
 - 配置：`/etc/nut-server/master.yaml`、`/etc/nut-server/slave.yaml`
 - systemd unit：`packaging/systemd/nut-master.service`、`packaging/systemd/nut-slave.service`
-- 服务用户：master 与 slave 都以 `nut-server` 用户运行。slave 通过 `/etc/sudoers.d/nut-server-slave` 受限授权 `shutdown` 命令；master 在安装时通过 systemd 沙箱（`NoNewPrivileges` 等）进一步加固。
+- 服务用户：master 与 slave 都以 `nut-server` 用户运行，分别通过 `/etc/sudoers.d/nut-server-slave` / `nut-server-master` 受限授权 `shutdown` 命令。systemd unit 只用文件系统隔离（`ProtectSystem=strict` 等）；会隐式开启 `NoNewPrivileges` 的选项被刻意去掉，否则 sudo 关机会失败。两端启动时都会自检关机命令能否执行。
 
 ### 方案 A：apt / yum / dnf 一键安装（推荐）
 
@@ -321,7 +324,7 @@ curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/
   | sudo sh -s -- --role slave --version latest
 ```
 
-包安装会自动建 `nut-server` 用户、装 sudoers、chown 配置目录，并在 master 首次安装时随机生成 `admin_token` 写入 `/etc/nut-server/master.yaml`。安装完成后还需要：
+包安装会自动建 `nut-server` 用户、装 sudoers、把配置目录设为 `root:nut-server`（服务只读），并在 master 首次安装时随机生成 `admin_token` 写入 `/etc/nut-server/master.yaml`。安装完成后还需要：
 
 ```bash
 # master：补齐 auth_tokens 与 snmp.target
@@ -425,6 +428,13 @@ local_shutdown:
 - 远端全部完成（`remote_complete`）
 - 等待超过 `max_wait`（`wait_expired`）
 - UPS 剩余分钟 < `emergency_runtime_minutes`：先对仍在处理的远端补发一次关机指令，再立即关本机（`emergency_runtime`）
+
+规则（v0.5.2+）：
+
+- 只有目标为全部节点的命令会启动等待流程；只关部分 tag / node_id 的命令（包括手动测试）不会关 master
+- 断电期间续航低于 `emergency_runtime_minutes` 时，即使没有任何策略触发、没有在线 slave，master 也会关本机
+- 命令带 `dry_run` 时本机关机只模拟
+- 市电恢复会取消尚未开始的本机关机；执行失败每 30s 重试一次
 
 `/status` 的 `local_shutdown` 字段会显示当前在哪个阶段（`idle` / `waiting_remote` / `wait_expired` / `emergency` / `executing` / `completed` / `failed`）。
 

@@ -1,6 +1,7 @@
 package slave
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,5 +48,40 @@ func TestClientSaveStateCreatesParentDirectory(t *testing.T) {
 	client.commandMu.Unlock()
 	if _, err := os.Stat(stateFile); err != nil {
 		t.Fatalf("expected state file written: %v", err)
+	}
+}
+
+func TestSetCommandStatePrunesOldestBeyondCapButKeepsActiveExecutions(t *testing.T) {
+	client := NewClient(config.SlaveConfig{NodeID: "node-1"})
+	base := time.Now().UTC().Add(-time.Hour)
+	const protectedID = "cmd-000"
+	client.commandMu.Lock()
+	client.executions[protectedID] = &shutdownExecution{}
+	client.commandMu.Unlock()
+
+	total := maxRetainedCommandStates + 5
+	for i := 0; i < total; i++ {
+		client.setCommandState(protocol.ShutdownAckMessage{
+			CommandID: fmt.Sprintf("cmd-%03d", i),
+			Status:    protocol.ShutdownStatusExecuted,
+			AckedAt:   base.Add(time.Duration(i) * time.Second),
+		})
+	}
+
+	client.commandMu.Lock()
+	defer client.commandMu.Unlock()
+	if len(client.commandStates) != maxRetainedCommandStates {
+		t.Fatalf("len=%d want %d", len(client.commandStates), maxRetainedCommandStates)
+	}
+	if _, ok := client.commandStates[protectedID]; !ok {
+		t.Fatalf("expected command with active execution to be retained")
+	}
+	for i := 1; i <= 5; i++ {
+		if _, ok := client.commandStates[fmt.Sprintf("cmd-%03d", i)]; ok {
+			t.Fatalf("expected oldest cmd-%03d to be pruned", i)
+		}
+	}
+	if _, ok := client.commandStates[fmt.Sprintf("cmd-%03d", total-1)]; !ok {
+		t.Fatalf("expected newest command retained")
 	}
 }
