@@ -2,8 +2,9 @@
 set -eu
 
 # Stop and disable only when the package is removed (deb passes "remove", rpm
-# passes 0). On upgrade the service keeps running and postinst restarts it onto
-# the new binary once the existing config passes its checks.
+# passes 0). On upgrade the service keeps running and the new package's postinst
+# (deb) or %posttrans (rpm) restarts it onto the new binary once the existing
+# config passes its checks.
 case "${1:-}" in
   remove | 0)
     if command -v systemctl >/dev/null 2>&1; then
