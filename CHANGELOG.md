@@ -11,7 +11,7 @@
 ### Added
 - **per-node token**:slave 首次用 `enrollment_tokens` 注册后,master 签发专属 token,只保存其 SHA-256;此后该 node_id 只能用专属 token 注册,共享 token 不能再冒用已注册节点。`enrollment: closed` 拒绝新节点;`DELETE /nodes/{node_id}/token` 吊销。`/status` 新增 `enrolled`。
 - **策略防抖** `duration`:条件连续满足这么久才触发。轮询失败不清零也不触发。
-- **UPS 失联兜底**:策略条件 `when.ups_unreachable_for`;`local_shutdown.unreachable_after`(缺省等于 `max_wait`)在断电期间 UPS 失联时按紧急处理关 master,触发原因 `ups_unreachable`。
+- **UPS 失联兜底**:策略条件 `when.ups_unreachable_for`(断电期间 master 重启后一直读不到 UPS 时,从启动时刻计时);`local_shutdown.unreachable_after`(缺省等于 `max_wait`)在断电期间 UPS 失联时按紧急处理关 master,触发原因 `ups_unreachable`。
 - **HTTPS admin** `admin_tls`(最低 TLS 1.2);admin 绑非回环地址又没配 TLS 时启动打 WARN。
 - **SNMP profile**(`ups-mib` 默认 / `apc` / `cyberpower` / `eaton`)与单项覆盖,runtime 支持 minutes / seconds / timeticks;**支持 SNMPv3**(USM)。厂商 profile 尚未经真机验证。
 - `install_ca_file`:装机脚本内嵌的 CA,设为签发 master 证书的 CA 后,master 换证书不用改 slave;未设置时沿用 `tls.cert_file`。
@@ -23,6 +23,7 @@
 - token 比较先做 SHA-256 再逐个恒定时间比较,不再泄露长度。
 - slave state 文件改为结构化格式(含签发的 token),旧文件的已处理命令记录丢弃一次。
 - 指标 `nut_master_register_attempts_total` 新增 `result="enrolled"`。
+- 取消预期节点改为 `DELETE /nodes/{node_id}/expected`(原 `DELETE /nodes/expect/{node_id}`),避免与 `DELETE /nodes/{node_id}/token` 路径冲突。
 - 签发的 token 只在 slave 回复 `token_stored` 后生效,旧版 slave 不受影响,继续用 enrollment token 注册。
 
 ### Fixed

@@ -334,10 +334,10 @@ func TestRevokeTokenRequiresAdminToken(t *testing.T) {
 	}
 }
 
-func TestUnsetExpectedRouteStillWorksNextToTokenRoute(t *testing.T) {
+func TestUnsetExpectedRouteClearsFlagForAnyNodeID(t *testing.T) {
 	server := newEnrollmentServer(t, config.EnrollmentOpen)
 	server.directory.SetExpected("token", "", nil)
-	req := httptest.NewRequest(http.MethodDelete, "/nodes/expect/token", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/token/expected", nil)
 	req.Header.Set("Authorization", "Bearer admin")
 	rec := httptest.NewRecorder()
 
@@ -348,6 +348,23 @@ func TestUnsetExpectedRouteStillWorksNextToTokenRoute(t *testing.T) {
 	}
 	if meta, _ := server.directory.Get("token"); meta.Expected {
 		t.Fatal("expected flag should be cleared")
+	}
+}
+
+func TestRevokeTokenRouteWorksForNodeNamedExpect(t *testing.T) {
+	server := newEnrollmentServer(t, config.EnrollmentOpen)
+	server.issueNodeToken("expect")
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/expect/token", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	rec := httptest.NewRecorder()
+
+	server.adminMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if server.isEnrolled("expect") {
+		t.Fatal("token of node \"expect\" should be revoked")
 	}
 }
 

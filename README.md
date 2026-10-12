@@ -88,7 +88,7 @@ UPS 读取由 `snmp.profile` 决定 OID:默认 `ups-mib`(RFC 1628 UPS-MIB),另�
 - **master 本机关机**: 远端节点完成后再关本机, `max_wait` 兜底 + `emergency_runtime_minutes` 紧急阈值 + 断电期间 UPS 失联超过 `unreachable_after` 时紧急关机
 
 ### 管理与可观测
-- **管理 API**: `/status`、`/commands/shutdown`、`/commands/reset`、`/nodes/expect`、`/nodes/{id}`、`/nodes/{id}/token`,全部要求 `Authorization: Bearer <admin_token>`
+- **管理 API**: `/status`、`/commands/shutdown`、`/commands/reset`、`/nodes/expect`、`/nodes/{id}`、`/nodes/{id}/expected`、`/nodes/{id}/token`,全部要求 `Authorization: Bearer <admin_token>`
 - **HTTPS admin** (v0.6.0+): 配置 `admin_tls` 后 admin 口改为 HTTPS(最低 TLS 1.2)
 - **内嵌只读状态页**: `GET /` 直接看 UPS、节点表、活动命令;`admin_token` 仅放 sessionStorage
 - **节点目录**: 每节点 `first_seen` / `last_seen` / `tags` / `hostname`,可预登记"预期但还没上线"的节点
@@ -220,7 +220,7 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `shutdown_policies`（**必填，至少一条**）: 关机策略。策略只在 UPS 走电池时评估。每条 policy 内部 AND, 多条 OR。命中多条时 target 取并集 (任一 `all:true` 则关全部; 否则 tags/node_ids 并集), reason 拼接成 `a; b`。字段:
   - `name` (必填, 唯一)
   - `when.charge_below` / `when.runtime_below`: 电量低于百分比 / 剩余运行时间低于分钟数。`when` 为空表示一走电池就触发
-  - `when.ups_unreachable_for`（v0.6.0+）: 断电期间（最后一次成功读数显示走电池）UPS 连续这么久没有应答就触发。只能单独使用，不能与 `charge_below` / `runtime_below` 或 `duration` 组合。计时只看当前进程内的成功轮询，master 重启后在第一次成功轮询前不按失联处理
+  - `when.ups_unreachable_for`（v0.6.0+）: 断电期间（最后一次成功读数显示走电池）UPS 连续这么久没有应答就触发。只能单独使用，不能与 `charge_below` / `runtime_below` 或 `duration` 组合。从最后一次成功读数开始计时；master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时，到时照常触发，并恢复对重启前那条关机命令的重放和重试
   - `duration`（v0.6.0+，默认 0 即立即触发）: 条件需连续满足这么久才触发。轮询失败不清零计时，也不触发；触发需要一次新的命中读数。master 重启或新的一次断电都会重新计时
   - `target.all` / `target.tags` / `target.node_ids` (全空 → 默认 `all:true`)
   - `reason` (可选, 缺省自动生成)
@@ -463,6 +463,9 @@ curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/commands/sh
 curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9001/nodes/expect \
   -H 'Content-Type: application/json' \
   -d '{"node_id":"printer","hostname":"printer.lan","tags":["office"]}'
+
+# 取消预期标记，节点记录保留（v0.6.0 起路径为 /nodes/{id}/expected）
+curl -H "Authorization: Bearer $TOKEN" -X DELETE http://127.0.0.1:9001/nodes/printer/expected
 
 # 吊销节点的专属 token 并断开它（204；该节点没有 token 时 404）
 curl -H "Authorization: Bearer $TOKEN" -X DELETE http://127.0.0.1:9001/nodes/slave-01/token

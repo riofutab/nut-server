@@ -41,7 +41,8 @@ func (s *Server) adminMux() *http.ServeMux {
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
 	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))
 	mux.HandleFunc("POST /nodes/expect", s.requireAdminToken(s.handleExpectNode))
-	mux.HandleFunc("DELETE /nodes/{node_id}/{sub}", s.requireAdminToken(s.handleDeleteNodeSubresource))
+	mux.HandleFunc("DELETE /nodes/{node_id}/expected", s.requireAdminToken(s.handleUnsetExpected))
+	mux.HandleFunc("DELETE /nodes/{node_id}/token", s.requireAdminToken(s.handleRevokeToken))
 	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
 	mux.HandleFunc("POST /nodes/{node_id}/install-script", s.requireAdminToken(s.handleInstallScript))
 	return mux
@@ -197,23 +198,6 @@ func (s *Server) handleExpectNode(w http.ResponseWriter, r *http.Request) {
 	s.saveStateForDirectoryChange()
 	meta, _ := s.directory.Get(req.NodeID)
 	writeJSON(w, http.StatusOK, meta)
-}
-
-// handleDeleteNodeSubresource serves DELETE /nodes/expect/{node_id} and
-// DELETE /nodes/{node_id}/token. ServeMux rejects registering both patterns
-// because /nodes/expect/token matches each; that path unsets "token"'s
-// expected flag.
-func (s *Server) handleDeleteNodeSubresource(w http.ResponseWriter, r *http.Request) {
-	first, sub := r.PathValue("node_id"), r.PathValue("sub")
-	switch {
-	case first == "expect":
-		r.SetPathValue("node_id", sub)
-		s.handleUnsetExpected(w, r)
-	case sub == "token":
-		s.handleRevokeToken(w, r)
-	default:
-		writeJSONError(w, http.StatusNotFound, "not found")
-	}
 }
 
 func (s *Server) handleUnsetExpected(w http.ResponseWriter, r *http.Request) {

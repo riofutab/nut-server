@@ -71,6 +71,7 @@ sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-serv
 - 用 `POST /nodes/<node_id>/install-script` 生成的装机脚本会给该节点签发新 token，并断开它当前的连接；旧的 `GET /install/slave` 已删除。通过脚本安装的节点配置里只有专属 token，被吊销后要重新生成装机脚本。
 - `install-slave.sh` / `quick-install-slave.sh` 的 `--token` 改为 `--token-file <路径>`。
 - slave 的 state 文件格式改变，旧文件里的已处理命令记录会被丢弃一次。请在市电正常时升级。
+- 取消预期节点的接口从 `DELETE /nodes/expect/<node_id>` 改为 `DELETE /nodes/<node_id>/expected`，调用旧路径的脚本需要修改。
 - 指标 `nut_master_register_attempts_total` 新增 `result="enrolled"`，表示本次注册签发了专属 token。
 
 ## v0.5.1 → v0.5.2 升级注意

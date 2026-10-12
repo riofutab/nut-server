@@ -1199,7 +1199,7 @@ func TestHandleUnsetExpectedClearsFlagOnly(t *testing.T) {
 	server.directory.Observe("nas01", "nas01.lan", nil, time.Now().UTC())
 	server.directory.SetExpected("nas01", "nas01.lan", nil)
 
-	req := httptest.NewRequest(http.MethodDelete, "/nodes/expect/nas01", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/nas01/expected", nil)
 	req.SetPathValue("node_id", "nas01")
 	rec := httptest.NewRecorder()
 
