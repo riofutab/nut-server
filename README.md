@@ -64,7 +64,7 @@ UPS 读取默认按 UPS-MIB:`output_source_oid` 判断是否切到电池供电 �
 - [Prometheus 指标](#prometheus-指标)
 - [开发辅助](#开发辅助)
 - [路线图](#路线图)
-- [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Upgrade Notes](docs/upgrade.md) · [Changelog](CHANGELOG.md)
+- [Security](SECURITY.md) · [Upgrade Notes](docs/upgrade.md) · [Changelog](CHANGELOG.md)
 
 ## Features
 
