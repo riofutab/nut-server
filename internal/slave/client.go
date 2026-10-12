@@ -274,16 +274,18 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 	}
 	if ack.IssuedToken != "" {
 		// Persist before confirming: the master binds the node to the token on
-		// token_stored, so it must never bind a token we could lose.
+		// token_stored, so it must never bind a token we could lose. Without
+		// the confirmation the master treats us as a pre-v0.6 slave, so stay
+		// registered rather than reconnect into the same failure forever.
 		if err := c.setIssuedToken(ack.IssuedToken); err != nil {
-			recordConnectAttempt("register_error")
-			return fmt.Errorf("store issued token: %w", err)
+			slog.Error("cannot store the issued token; keep using the config token", "node_id", c.cfg.NodeID, "state_file", c.cfg.StateFile, "err", err)
+		} else {
+			if err := session.Send(protocol.TypeTokenStored, nil); err != nil {
+				recordConnectAttempt("register_error")
+				return fmt.Errorf("confirm issued token: %w", err)
+			}
+			slog.Info("enrolled with master; stored issued token", "node_id", c.cfg.NodeID, "state_file", c.cfg.StateFile)
 		}
-		if err := session.Send(protocol.TypeTokenStored, nil); err != nil {
-			recordConnectAttempt("register_error")
-			return fmt.Errorf("confirm issued token: %w", err)
-		}
-		slog.Info("enrolled with master; stored issued token", "node_id", c.cfg.NodeID, "state_file", c.cfg.StateFile)
 	}
 	recordConnectAttempt("success")
 	setConnected(true)

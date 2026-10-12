@@ -249,14 +249,90 @@ func TestInstallScriptWithTLSEmbedsCAAndServerName(t *testing.T) {
 	}
 }
 
-func TestInstallScriptQuotesHostHeaderFallback(t *testing.T) {
+func TestInstallScriptRejectsMasterAddrTheSlaveScriptWouldRefuse(t *testing.T) {
 	setReleaseVersion(t, "v0.6.0")
-	server := newInstallServer(config.MasterConfig{})
+	cases := []struct {
+		name       string
+		publicAddr string
+		host       string
+	}{
+		{"quote in host header", "", "evil'host:9001"},
+		{"ipv6 with zone", "[fe80::1%eth0]:9000", ""},
+		{"unbracketed ipv6", "2001:db8::1:9000", ""},
+		{"public_addr without port", "nut.example", ""},
+		{"signed port", "nut.example:+9000", ""},
+		{"space in public_addr", "nut example:9000", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newInstallServer(config.MasterConfig{PublicAddr: tc.publicAddr})
 
-	script := postInstallScript(server, "db01", "evil'host:9001").Body.String()
+			rec := postInstallScript(server, "db01", tc.host)
 
-	if !strings.Contains(script, `--master-addr 'evil'\''host:9000'`) {
-		t.Errorf("master addr should be shell-quoted\nscript:\n%s", script)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d want 400 body=%s", rec.Code, rec.Body.String())
+			}
+			if server.isEnrolled("db01") {
+				t.Fatal("a refused request must not issue a token")
+			}
+		})
+	}
+}
+
+func TestInstallScriptAcceptsBracketedIPv6MasterAddr(t *testing.T) {
+	setReleaseVersion(t, "v0.6.0")
+	certFile := filepath.Join(t.TempDir(), "master.crt")
+	if err := os.WriteFile(certFile, []byte("-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	server := newInstallServer(config.MasterConfig{
+		TLS: config.TLSConfig{Enabled: true, CertFile: certFile, KeyFile: "unused.key"},
+	})
+
+	rec := postInstallScript(server, "db01", "[2001:db8::1]:9001")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	script := rec.Body.String()
+	for _, want := range []string{"--master-addr '[2001:db8::1]:9000'", "--tls-server-name '2001:db8::1'"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q\nscript:\n%s", want, script)
+		}
+	}
+}
+
+func TestInstallScriptRejectsLoopbackMasterAddr(t *testing.T) {
+	setReleaseVersion(t, "v0.6.0")
+	cases := []struct {
+		name       string
+		publicAddr string
+		host       string
+	}{
+		{"localhost host header", "", "localhost:9001"},
+		{"ipv4 loopback host header", "", "127.0.0.1:9001"},
+		{"other ipv4 loopback", "", "127.1.2.3"},
+		{"loopback public_addr", "127.0.0.1:9000", ""},
+		{"uppercase localhost", "LOCALHOST:9000", ""},
+		{"ipv6 loopback host header", "", "[::1]:9001"},
+		{"ipv6 loopback public_addr", "[::1]:9000", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newInstallServer(config.MasterConfig{PublicAddr: tc.publicAddr})
+
+			rec := postInstallScript(server, "db01", tc.host)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d want 503 body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "set public_addr in master.yaml") {
+				t.Errorf("error should tell the operator to set public_addr, got %q", rec.Body.String())
+			}
+			if server.isEnrolled("db01") {
+				t.Fatal("a refused request must not issue a token")
+			}
+		})
 	}
 }
 
@@ -298,7 +374,7 @@ func TestInstallScriptRequiresAdminToken(t *testing.T) {
 func TestInstallScriptEmbedsInstallCAFileInsteadOfMasterCertificate(t *testing.T) {
 	setReleaseVersion(t, "v0.6.0")
 	dir := t.TempDir()
-	caPEM := []byte("-----BEGIN CERTIFICATE-----\nMIIBca\n-----END CERTIFICATE-----\n")
+	caPEM := []byte("-----BEGIN CERTIFICATE-----\nMIIBcafe\n-----END CERTIFICATE-----\n")
 	caFile := filepath.Join(dir, "ca.crt")
 	certFile := filepath.Join(dir, "master.crt")
 	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
@@ -322,5 +398,59 @@ func TestInstallScriptEmbedsInstallCAFileInsteadOfMasterCertificate(t *testing.T
 	}
 	if string(decoded) != string(caPEM) {
 		t.Fatalf("embedded CA=%q want install_ca_file content %q", decoded, caPEM)
+	}
+}
+
+func TestInstallScriptEmbedsOnlyCertificatesFromCombinedPEM(t *testing.T) {
+	setReleaseVersion(t, "v0.6.0")
+	certBlock := "-----BEGIN CERTIFICATE-----\nMIIBleaf\n-----END CERTIFICATE-----\n"
+	keyBlock := "-----BEGIN PRIVATE KEY-----\nMIIEsecret\n-----END PRIVATE KEY-----\n"
+	caBlock := "-----BEGIN CERTIFICATE-----\nMIIBroot\n-----END CERTIFICATE-----\n"
+	certFile := filepath.Join(t.TempDir(), "combined.pem")
+	if err := os.WriteFile(certFile, []byte(certBlock+keyBlock+caBlock), 0o600); err != nil {
+		t.Fatalf("write combined pem: %v", err)
+	}
+	server := newInstallServer(config.MasterConfig{
+		PublicAddr: "nut.example:9000",
+		TLS:        config.TLSConfig{Enabled: true, CertFile: certFile, KeyFile: certFile},
+	})
+
+	script := postInstallScript(server, "db01", "").Body.String()
+
+	encoded := strings.ReplaceAll(heredocBody(t, script, installCADelimiter), "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode embedded CA: %v", err)
+	}
+	if strings.Contains(string(decoded), "PRIVATE KEY") || strings.Contains(script, "PRIVATE KEY") {
+		t.Fatalf("script must not embed a private key, embedded CA=%q", decoded)
+	}
+	if want := certBlock + caBlock; string(decoded) != want {
+		t.Fatalf("embedded CA=%q want only the certificates %q", decoded, want)
+	}
+}
+
+func TestInstallScriptRefusesCAFileWithoutCertificates(t *testing.T) {
+	setReleaseVersion(t, "v0.6.0")
+	keyFile := filepath.Join(t.TempDir(), "key-only.pem")
+	if err := os.WriteFile(keyFile, []byte("-----BEGIN PRIVATE KEY-----\nMIIEsecret\n-----END PRIVATE KEY-----\n"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	server := newInstallServer(config.MasterConfig{
+		PublicAddr:    "nut.example:9000",
+		InstallCAFile: keyFile,
+		TLS:           config.TLSConfig{Enabled: true, CertFile: keyFile, KeyFile: keyFile},
+	})
+
+	rec := postInstallScript(server, "db01", "")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "PRIVATE KEY") {
+		t.Fatal("error must not echo the file content")
+	}
+	if server.isEnrolled("db01") {
+		t.Fatal("a refused request must not issue a token")
 	}
 }

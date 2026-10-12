@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"time"
 
 	"nut-server/internal/atomicfile"
 	"nut-server/internal/protocol"
@@ -30,11 +31,13 @@ func (s *Server) loadState() {
 			return
 		}
 		slog.Error("load master state failed", "path", s.cfg.StateFile, "err", err)
+		s.setAsideStateFile()
 		return
 	}
 	var state persistedState
 	if err := json.Unmarshal(content, &state); err != nil {
 		slog.Error("decode master state failed", "path", s.cfg.StateFile, "err", err)
+		s.setAsideStateFile()
 		return
 	}
 	if state.Commands == nil {
@@ -52,6 +55,17 @@ func (s *Server) loadState() {
 	if state.NodeTokens != nil {
 		s.nodeTokens = state.NodeTokens
 	}
+}
+
+// setAsideStateFile moves an unusable state file out of the way so the next
+// save does not overwrite node token bindings an operator may still recover.
+func (s *Server) setAsideStateFile() {
+	target := s.cfg.StateFile + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
+	if err := os.Rename(s.cfg.StateFile, target); err != nil {
+		slog.Error("set aside unusable master state failed; it will be overwritten on the next save", "path", s.cfg.StateFile, "err", err)
+		return
+	}
+	slog.Error("moved unusable master state aside; starting with empty state", "path", target)
 }
 
 func (s *Server) saveStateForDirectoryChange() {
