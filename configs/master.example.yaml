@@ -12,6 +12,9 @@ admin_tls:
 public_addr: ""
 # install_repo: 装机脚本用来拉取 install-online.sh 的 GitHub 仓库。留空使用默认上游。
 install_repo: ""
+# install_ca_file: 装机脚本写给 slave 的 CA(仅 tls 开启时可用)。建议填签发 master 证书的 CA,
+# master 换证书时 slave 不用改;留空时内嵌 tls.cert_file,slave 只信任这一张证书。
+install_ca_file: ""
 state_file: "data/master-state.json"
 # enrollment_tokens: 只用于节点首次注册。注册成功后 master 给该 node_id 签发专属 token,
 # 之后这个 node_id 只能用专属 token 注册。

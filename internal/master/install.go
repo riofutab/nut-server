@@ -58,10 +58,14 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	}
 	params := installScriptParams{repo: repo, releaseTag: releaseTag, nodeID: nodeID, masterAddr: masterAddr}
 	if s.cfg.TLS.EnabledForServer() {
-		caPEM, err := os.ReadFile(s.cfg.TLS.CertFile)
+		caFile := s.cfg.InstallCAFile
+		if caFile == "" {
+			caFile = s.cfg.TLS.CertFile
+		}
+		caPEM, err := os.ReadFile(caFile)
 		if err != nil {
-			slog.Error("read master certificate for install script failed", "path", s.cfg.TLS.CertFile, "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "cannot read master tls.cert_file")
+			slog.Error("read CA for install script failed", "path", caFile, "err", err)
+			writeJSONError(w, http.StatusInternalServerError, "cannot read the CA for the install script (install_ca_file or tls.cert_file)")
 			return
 		}
 		params.caPEM = caPEM

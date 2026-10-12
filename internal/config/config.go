@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -41,7 +42,11 @@ type MasterConfig struct {
 	AdminTLS        AdminTLSConfig `yaml:"admin_tls"`
 	PublicAddr      string         `yaml:"public_addr"`
 	InstallRepo     string         `yaml:"install_repo"`
-	StateFile       string         `yaml:"state_file"`
+	// InstallCAFile is the CA the install script writes to slaves as their
+	// trust anchor. Empty embeds tls.cert_file, which slaves then pin until the
+	// master certificate is replaced.
+	InstallCAFile string `yaml:"install_ca_file"`
+	StateFile     string `yaml:"state_file"`
 	// EnrollmentTokens admit a node_id that has no issued per-node token yet;
 	// the master then issues it one and the enrollment token can no longer
 	// register as that node.
@@ -319,6 +324,9 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if (cfg.AdminTLS.CertFile == "") != (cfg.AdminTLS.KeyFile == "") {
 		return MasterConfig{}, fmt.Errorf("admin_tls.cert_file and admin_tls.key_file must be set together")
 	}
+	if err := validateInstallCAFile(cfg); err != nil {
+		return MasterConfig{}, err
+	}
 	if cfg.SNMP.Target == "" {
 		return MasterConfig{}, fmt.Errorf("snmp.target must not be empty")
 	}
@@ -344,6 +352,23 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 		return MasterConfig{}, err
 	}
 	return cfg, nil
+}
+
+func validateInstallCAFile(cfg MasterConfig) error {
+	if cfg.InstallCAFile == "" {
+		return nil
+	}
+	if !cfg.TLS.EnabledForServer() {
+		return fmt.Errorf("install_ca_file requires TLS on the slave listener (tls.enabled)")
+	}
+	content, err := os.ReadFile(cfg.InstallCAFile)
+	if err != nil {
+		return fmt.Errorf("read install_ca_file: %w", err)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(content) {
+		return fmt.Errorf("install_ca_file %s contains no PEM certificate", cfg.InstallCAFile)
+	}
+	return nil
 }
 
 func normalizeShutdownPolicies(cfg *MasterConfig) error {

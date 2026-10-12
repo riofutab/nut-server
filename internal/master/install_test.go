@@ -294,3 +294,33 @@ func TestInstallScriptRequiresAdminToken(t *testing.T) {
 		t.Fatalf("status=%d want 401", rec.Code)
 	}
 }
+
+func TestInstallScriptEmbedsInstallCAFileInsteadOfMasterCertificate(t *testing.T) {
+	setReleaseVersion(t, "v0.6.0")
+	dir := t.TempDir()
+	caPEM := []byte("-----BEGIN CERTIFICATE-----\nMIIBca\n-----END CERTIFICATE-----\n")
+	caFile := filepath.Join(dir, "ca.crt")
+	certFile := filepath.Join(dir, "master.crt")
+	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	if err := os.WriteFile(certFile, []byte("-----BEGIN CERTIFICATE-----\nMIIBleaf\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	server := newInstallServer(config.MasterConfig{
+		PublicAddr:    "nut.example:9000",
+		InstallCAFile: caFile,
+		TLS:           config.TLSConfig{Enabled: true, CertFile: certFile, KeyFile: "unused.key"},
+	})
+
+	script := postInstallScript(server, "db01", "").Body.String()
+
+	encoded := strings.ReplaceAll(heredocBody(t, script, installCADelimiter), "\n", "")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode embedded CA: %v", err)
+	}
+	if string(decoded) != string(caPEM) {
+		t.Fatalf("embedded CA=%q want install_ca_file content %q", decoded, caPEM)
+	}
+}
