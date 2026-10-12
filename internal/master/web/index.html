@@ -80,6 +80,7 @@ footer { color: var(--muted); font-size: 0.85em; margin-top: 1rem; }
 <div id="ups" class="card"></div>
 <div id="nodes" class="card"></div>
 <div id="command" class="card"></div>
+<div id="local" class="card"></div>
 <footer><span id="updated"></span></footer>
 
 <script>
@@ -121,6 +122,52 @@ function fmtAge(ts) {
   if (hours < 24)    return hours + 'h ago';
   const days = Math.floor(hours / 24);
   return days + 'd ago';
+}
+
+function fmtUntil(ts) {
+  if (!ts) return '—';
+  const seconds = Math.floor((new Date(ts).getTime() - Date.now()) / 1000);
+  if (seconds <= 0) return 'passed';
+  if (seconds < 60) return 'in ' + seconds + 's';
+  return 'in ' + fmtDuration(Math.ceil(seconds / 60));
+}
+
+// Keys mirror protocol.LocalShutdownPhase* / LocalShutdownTrigger*.
+const LOCAL_PHASES = {
+  idle: 'idle',
+  waiting_remote: 'waiting for nodes to shut down',
+  wait_expired: 'max_wait reached, powering off',
+  emergency: 'emergency power-off',
+  executing: 'running the shutdown command',
+  completed: 'shutdown command completed',
+  failed: 'shutdown command failed, retrying every 30s',
+};
+const LOCAL_TRIGGERS = {
+  remote_complete: 'all nodes finished',
+  wait_expired: 'max_wait reached',
+  emergency_runtime: 'UPS runtime below emergency_runtime_minutes',
+  ups_unreachable: 'UPS unreachable during the outage',
+};
+const LOCAL_WARN_PHASES = ['wait_expired', 'emergency', 'executing', 'failed'];
+
+function renderLocalShutdown(ls) {
+  const el = document.getElementById('local');
+  if (!ls) { el.innerHTML = '<h2>Master shutdown</h2><p class=muted>local_shutdown disabled</p>'; return; }
+  const check = ls.command_ready == null ? 'not checked (dry-run)'
+    : (ls.command_ready ? 'ok' : 'FAILED: master cannot run its shutdown command');
+  const rows = [
+    ['phase', LOCAL_PHASES[ls.phase] || ls.phase, LOCAL_WARN_PHASES.includes(ls.phase)],
+    ['command check', check, ls.command_ready === false],
+  ];
+  if (ls.trigger) rows.push(['trigger', LOCAL_TRIGGERS[ls.trigger] || ls.trigger, false]);
+  if (ls.command_id) rows.push(['command', ls.command_id, false]);
+  if (ls.started_at) rows.push(['started', fmtAge(ls.started_at), false]);
+  if (ls.deadline_at) rows.push(['deadline', fmtUntil(ls.deadline_at), false]);
+  if (ls.last_rebroadcast_at) rows.push(['last rebroadcast', fmtAge(ls.last_rebroadcast_at), false]);
+  if (ls.last_error) rows.push(['last error', ls.last_error, true]);
+  el.innerHTML = '<h2>Master shutdown</h2><table>' +
+    rows.map(r => '<tr><td>' + r[0] + '</td><td' + (r[2] ? ' class=error' : '') + '>' + escape(String(r[1])) + '</td></tr>').join('') +
+    '</table>';
 }
 
 function renderUps(ups) {
@@ -205,6 +252,7 @@ async function refresh() {
     renderUps(data.ups);
     renderNodes(data.nodes);
     renderCommand(data.active_command, data.episode);
+    renderLocalShutdown(data.local_shutdown);
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     errEl.style.display = 'block';

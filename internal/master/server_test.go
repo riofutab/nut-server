@@ -1311,3 +1311,32 @@ func TestRunFillsSNMPDefaultsForConfigNotFromLoader(t *testing.T) {
 		t.Fatalf("expected Run to fill SNMP OID defaults, got %+v", snmp)
 	}
 }
+
+func TestIndexLabelsEveryLocalShutdownPhaseAndTrigger(t *testing.T) {
+	server := NewServer(config.MasterConfig{AdminToken: "a"})
+	rec := httptest.NewRecorder()
+
+	server.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `id="local"`) || !strings.Contains(body, "renderLocalShutdown(data.local_shutdown)") {
+		t.Fatal("status page should render the local_shutdown section")
+	}
+	for _, key := range []string{
+		protocol.LocalShutdownPhaseIdle,
+		protocol.LocalShutdownPhaseWaitingRemote,
+		protocol.LocalShutdownPhaseWaitExpired,
+		protocol.LocalShutdownPhaseEmergency,
+		protocol.LocalShutdownPhaseExecuting,
+		protocol.LocalShutdownPhaseCompleted,
+		protocol.LocalShutdownPhaseFailed,
+		protocol.LocalShutdownTriggerRemoteComplete,
+		protocol.LocalShutdownTriggerWaitExpired,
+		protocol.LocalShutdownTriggerEmergencyRuntime,
+		protocol.LocalShutdownTriggerUPSUnreachable,
+	} {
+		if !strings.Contains(body, "  "+key+": ") {
+			t.Errorf("status page has no label for %q", key)
+		}
+	}
+}
