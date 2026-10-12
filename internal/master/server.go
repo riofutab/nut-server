@@ -33,9 +33,14 @@ type Server struct {
 	directory      *NodeDirectory
 	shutdownIssued atomic.Bool
 	ready          atomic.Bool
-	// upsConfirmed is set by the first successful UPS poll of this process.
-	// Auto shutdown activity restored from the state file waits for it.
-	upsConfirmed        atomic.Bool
+	// upsConfirmed is set by the first successful UPS poll of this process,
+	// or when an unreachable fallback fires for a restored episode because the
+	// UPS never answered. Auto shutdown activity restored from the state file
+	// waits for it.
+	upsConfirmed atomic.Bool
+	// startedAt is when this process started; UPS silence is measured from it
+	// until the first successful poll.
+	startedAt           time.Time
 	commandMu           sync.Mutex
 	commands            map[string]*shutdownCommandState
 	activeCommand       string
@@ -105,6 +110,7 @@ func NewServer(cfg config.MasterConfig) *Server {
 		directory: NewNodeDirectory(),
 		commands:  make(map[string]*shutdownCommandState),
 		conns:     make(map[net.Conn]struct{}),
+		startedAt: time.Now().UTC(),
 
 		nodeTokens:       make(map[string]string),
 		enrollmentHashes: hashTokens(cfg.EnrollmentTokens),

@@ -2,6 +2,7 @@ package master
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -228,4 +229,96 @@ func TestUnreachableEscalatesWaitingLocalShutdown(t *testing.T) {
 	if len(got) != 1 || got[0].trigger != protocol.LocalShutdownTriggerUPSUnreachable {
 		t.Fatalf("expected waiting local shutdown to escalate on ups_unreachable, got %+v", got)
 	}
+}
+
+// restartedServer persists an on-battery episode from a first master and
+// returns a second master that restored it from the state file without ever
+// reading the UPS.
+func restartedServer(t *testing.T, cfg config.MasterConfig, crashAt, restartAt time.Time) (*Server, *fakeUPS) {
+	t.Helper()
+	cfg.StateFile = filepath.Join(t.TempDir(), "master-state.json")
+	before, ups := newEpisodeServer(cfg)
+	before.localShutdownRunner = (&localShutdownCalls{}).run
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	pollAt(t, before, crashAt)
+
+	after, ups := newEpisodeServer(cfg)
+	after.startedAt = restartAt
+	if after.Status().Episode == nil {
+		t.Fatal("expected the episode to be restored from the state file")
+	}
+	return after, ups
+}
+
+func TestUnreachablePolicyFiresForRestoredEpisodeWhenUPSNeverAnswers(t *testing.T) {
+	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	server, ups := restartedServer(t, config.MasterConfig{
+		ShutdownPolicies: []config.ShutdownPolicySpec{
+			{Name: "low-charge", When: config.ShutdownPolicyWhen{ChargeBelow: 10}, Target: config.ShutdownPolicyTarget{All: true}},
+			{Name: "lost-ups", When: config.ShutdownPolicyWhen{UPSUnreachableFor: config.Duration{Duration: 2 * time.Minute}}, Target: config.ShutdownPolicyTarget{All: true}},
+		},
+	}, t0, t0.Add(10*time.Minute))
+	slave := newFakeSlave(t, server, "node-1")
+
+	failPollAt(t, server, ups, t0.Add(11*time.Minute))
+	slave.expectNothing(t)
+	failPollAt(t, server, ups, t0.Add(12*time.Minute))
+
+	slave.expectShutdown(t)
+}
+
+func TestLocalShutdownPowersOffMasterForRestoredEpisodeWhenUPSNeverAnswers(t *testing.T) {
+	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	local := enabledLocalShutdown()
+	local.UnreachableAfter = config.Duration{Duration: 5 * time.Minute}
+	server, ups := restartedServer(t, config.MasterConfig{
+		LocalShutdown: local,
+		ShutdownPolicies: []config.ShutdownPolicySpec{
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
+		},
+	}, t0, t0.Add(10*time.Minute))
+	calls := &localShutdownCalls{}
+	server.localShutdownRunner = calls.run
+	newFakeSlave(t, server, "node-1")
+
+	failPollAt(t, server, ups, t0.Add(14*time.Minute))
+	server.evaluateLocalShutdown(t0.Add(14*time.Minute), server.latestSuccessfulUPSStatus())
+	if got := calls.snapshot(); len(got) != 0 {
+		t.Fatalf("expected no local shutdown before unreachable_after since restart, got %+v", got)
+	}
+	failPollAt(t, server, ups, t0.Add(15*time.Minute))
+	server.evaluateLocalShutdown(t0.Add(15*time.Minute), server.latestSuccessfulUPSStatus())
+
+	got := calls.snapshot()
+	if len(got) != 1 || got[0].trigger != protocol.LocalShutdownTriggerUPSUnreachable {
+		t.Fatalf("expected the restored local shutdown to escalate on ups_unreachable, got %+v", got)
+	}
+}
+
+func TestRestoredEpisodeCommandIsRetriedOnceUnreachableFallbackFires(t *testing.T) {
+	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	server, ups := restartedServer(t, config.MasterConfig{
+		ShutdownPolicies: []config.ShutdownPolicySpec{
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
+			{Name: "lost-ups", When: config.ShutdownPolicyWhen{UPSUnreachableFor: config.Duration{Duration: 2 * time.Minute}}, Target: config.ShutdownPolicyTarget{All: true}},
+		},
+	}, t0, t0.Add(10*time.Minute))
+	reconnected := connectFakeSlave(t, "node-1")
+
+	failPollAt(t, server, ups, t0.Add(12*time.Minute))
+	if err := server.replayPendingShutdown(reconnected.client); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	reconnected.expectShutdown(t)
+}
+
+func TestUnreachableFallbackIgnoredWithoutEpisodeWhenUPSNeverAnswers(t *testing.T) {
+	server, ups, slave := unreachablePolicyServer(t)
+	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	server.startedAt = t0
+
+	failPollAt(t, server, ups, t0.Add(time.Hour))
+
+	slave.expectNothing(t)
 }

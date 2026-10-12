@@ -49,14 +49,23 @@ func (s *Server) evaluateUPS(polledAt time.Time) error {
 	return nil
 }
 
-// upsSilentFor returns how long the UPS has not answered, when the latest poll
-// failed after at least one success in this process.
+// upsSilentFor returns how long the UPS has not answered when the latest poll
+// failed. Silence counts from the last successful poll, or from process start
+// when the UPS has not answered since: a master restarted mid-outage must not
+// wait forever for a reading that never comes.
 func (s *Server) upsSilentFor(now time.Time) (time.Duration, bool) {
 	view := s.currentUPSStatus()
-	if view == nil || view.LastSuccessAt == nil || view.LastErrorAt == nil || !view.LastErrorAt.After(*view.LastSuccessAt) {
+	if view == nil || view.LastErrorAt == nil {
 		return 0, false
 	}
-	return now.Sub(*view.LastSuccessAt), true
+	since := s.startedAt
+	if view.LastSuccessAt != nil {
+		if !view.LastErrorAt.After(*view.LastSuccessAt) {
+			return 0, false
+		}
+		since = *view.LastSuccessAt
+	}
+	return now.Sub(since), true
 }
 
 func (s *Server) latestSuccessfulUPSStatus() *UPSStatus {

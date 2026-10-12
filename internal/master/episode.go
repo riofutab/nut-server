@@ -114,7 +114,10 @@ func (s *Server) evaluateEpisodePolicies(reading *UPSStatus, now time.Time) {
 	if episode.matchSince == nil {
 		episode.matchSince = make(map[string]time.Time)
 	}
-	var due []string
+	var (
+		due              []string
+		unreachableFired bool
+	)
 	for _, p := range s.cfg.ShutdownPolicies {
 		if slices.Contains(episode.FiredPolicies, p.Name) {
 			continue
@@ -122,6 +125,7 @@ func (s *Server) evaluateEpisodePolicies(reading *UPSStatus, now time.Time) {
 		if unreachableFor := p.When.UPSUnreachableFor.Duration; unreachableFor > 0 {
 			if reading == nil && silentFor >= unreachableFor {
 				due = append(due, p.Name)
+				unreachableFired = true
 			}
 			continue
 		}
@@ -143,6 +147,11 @@ func (s *Server) evaluateEpisodePolicies(reading *UPSStatus, now time.Time) {
 	}
 	s.commandMu.Unlock()
 
+	if unreachableFired {
+		// The restored episode is acted on without a reading, so its replay
+		// and retries must not keep waiting for one either.
+		s.upsConfirmed.Store(true)
+	}
 	if len(due) > 0 {
 		s.applyPolicyMatch(buildPolicyMatch(s.cfg.ShutdownPolicies, due), now)
 	}

@@ -57,15 +57,21 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 		dirty       bool
 	)
 	emergency := s.emergencyTrigger(upsStatus, now)
+	// A silent UPS past unreachable_after is acted on even before the first
+	// reading of this process; waiting for one would never end.
+	trusted := s.upsConfirmed.Load() || emergency == protocol.LocalShutdownTriggerUPSUnreachable
 
 	s.commandMu.Lock()
+	if emergency == protocol.LocalShutdownTriggerUPSUnreachable && s.episode != nil {
+		s.upsConfirmed.Store(true)
+	}
 	state := s.localShutdown
 	if state == nil {
 		// Emergency is a safety net independent of any "all" command: during an
 		// episode the master powers itself off at critical runtime or when the
 		// UPS stops answering, even when no policy targets every node (or none
 		// has fired yet).
-		if s.episode == nil || !s.upsConfirmed.Load() || emergency == "" {
+		if s.episode == nil || !trusted || emergency == "" {
 			s.commandMu.Unlock()
 			return
 		}
@@ -93,7 +99,7 @@ func (s *Server) evaluateLocalShutdown(now time.Time, upsStatus *UPSStatus) {
 		// Auto local shutdown restored from the state file waits for the first
 		// UPS reading, which ends the episode if power came back while the
 		// master was down.
-		if (!ok || command.Auto) && !s.upsConfirmed.Load() {
+		if (!ok || command.Auto) && !trusted {
 			s.commandMu.Unlock()
 			return
 		}
