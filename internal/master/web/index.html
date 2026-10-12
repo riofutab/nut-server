@@ -147,6 +147,7 @@ const LOCAL_TRIGGERS = {
   wait_expired: 'max_wait reached',
   emergency_runtime: 'UPS runtime below emergency_runtime_minutes',
   ups_unreachable: 'UPS unreachable during the outage',
+  low_battery: 'UPS reports low battery (NUT LB)',
 };
 const LOCAL_WARN_PHASES = ['wait_expired', 'emergency', 'executing', 'failed'];
 
@@ -173,13 +174,21 @@ function renderLocalShutdown(ls) {
 function renderUps(ups) {
   const el = document.getElementById('ups');
   if (!ups) { el.innerHTML = '<h2>UPS</h2><p class=muted>not configured</p>'; return; }
+  // After a successful poll a missing value means the UPS does not report it.
+  const absent = ups.last_success_at ? 'not reported' : '—';
   const rows = [
+    ['source',       ups.source || '—'],
     ['target',       ups.target || '—'],
     ['on battery',   ups.on_battery == null ? '—' : (ups.on_battery ? 'yes' : 'no')],
-    ['charge',       ups.battery_charge == null ? '—' : ups.battery_charge + '%'],
-    ['runtime',      ups.runtime_minutes == null ? '—' : fmtDuration(ups.runtime_minutes) + ' (' + ups.runtime_minutes + 'm)'],
-    ['last poll',    fmtAge(ups.last_success_at)],
   ];
+  if (ups.source === 'nut') {
+    rows.push(['low battery', ups.low_battery == null ? '—' : (ups.low_battery ? 'yes' : 'no')]);
+  }
+  rows.push(
+    ['charge',       ups.battery_charge == null ? absent : ups.battery_charge + '%'],
+    ['runtime',      ups.runtime_minutes == null ? absent : fmtDuration(ups.runtime_minutes) + ' (' + ups.runtime_minutes + 'm)'],
+    ['last poll',    fmtAge(ups.last_success_at)],
+  );
   const titles = { runtime: 'UPS-estimated time left on battery power at current charge/load' };
   let extra = '';
   if (ups.last_error) {

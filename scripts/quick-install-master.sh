@@ -5,7 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
   cat <<'EOF'
-usage: quick-install-master.sh --token-file <path> --snmp-target <host> [install-master options]
+usage: quick-install-master.sh --token-file <path> (--snmp-target <host> | --nut-ups <ups>@<host>[:<port>]) [install-master options]
 
 Defaults:
   - TLS is disabled unless you pass any --tls-* option or --disable-tls yourself.

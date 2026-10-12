@@ -44,11 +44,11 @@ func TestDebouncedPolicyIgnoresGlitchThatRecovers(t *testing.T) {
 	server, ups, slave := debouncedServer(t, 30*time.Second)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0)
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 60, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(60), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0.Add(10*time.Second))
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0.Add(20*time.Second))
 	pollAt(t, server, t0.Add(40*time.Second))
 
@@ -62,7 +62,7 @@ func TestDebouncedPolicyFiresAfterConditionHoldsForDuration(t *testing.T) {
 	server, ups, slave := debouncedServer(t, 30*time.Second)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0)
 	pollAt(t, server, t0.Add(29*time.Second))
 	slave.expectNothing(t)
@@ -78,12 +78,12 @@ func TestDebounceSurvivesFailedPollButNeedsFreshReadingToFire(t *testing.T) {
 	server, ups, slave := debouncedServer(t, 30*time.Second)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0)
 	failPollAt(t, server, ups, t0.Add(31*time.Second))
 	slave.expectNothing(t)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0.Add(32*time.Second))
 
 	slave.expectShutdown(t)
@@ -93,11 +93,11 @@ func TestDebounceRestartsInNewEpisode(t *testing.T) {
 	server, ups, slave := debouncedServer(t, 30*time.Second)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0)
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0.Add(10*time.Second))
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	pollAt(t, server, t0.Add(20*time.Second))
 	pollAt(t, server, t0.Add(31*time.Second))
 
@@ -119,7 +119,7 @@ func TestUnreachablePolicyFiresWhenUPSSilentDuringEpisode(t *testing.T) {
 	server, ups, slave := unreachablePolicyServer(t)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	failPollAt(t, server, ups, t0.Add(time.Minute))
 	slave.expectNothing(t)
@@ -135,7 +135,7 @@ func TestUnreachablePolicyIgnoredOnLinePower(t *testing.T) {
 	server, ups, slave := unreachablePolicyServer(t)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 100, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(100), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	failPollAt(t, server, ups, t0.Add(10*time.Minute))
 
@@ -146,7 +146,7 @@ func TestUnreachablePolicyNotMatchedBySuccessfulPoll(t *testing.T) {
 	server, ups, slave := unreachablePolicyServer(t)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	pollAt(t, server, t0.Add(5*time.Minute))
 
@@ -172,7 +172,7 @@ func TestLocalShutdownPowersOffMasterWhenUPSUnreachableDuringEpisode(t *testing.
 	server, ups, calls := unreachableLocalShutdownServer(t)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	failPollAt(t, server, ups, t0.Add(4*time.Minute))
 	server.evaluateLocalShutdown(t0.Add(4*time.Minute), server.latestSuccessfulUPSStatus())
@@ -193,7 +193,7 @@ func TestLocalShutdownIgnoresUnreachableUPSOnLinePower(t *testing.T) {
 	server, ups, calls := unreachableLocalShutdownServer(t)
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 100, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(100), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	failPollAt(t, server, ups, t0.Add(time.Hour))
 	server.evaluateLocalShutdown(t0.Add(time.Hour), server.latestSuccessfulUPSStatus())
@@ -217,7 +217,7 @@ func TestUnreachableEscalatesWaitingLocalShutdown(t *testing.T) {
 	newFakeSlave(t, server, "node-1")
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	if phase := server.Status().LocalShutdown.Phase; phase != protocol.LocalShutdownPhaseWaitingRemote {
 		t.Fatalf("expected waiting_remote, got %q", phase)
@@ -239,7 +239,7 @@ func restartedServer(t *testing.T, cfg config.MasterConfig, crashAt, restartAt t
 	cfg.StateFile = filepath.Join(t.TempDir(), "master-state.json")
 	before, ups := newEpisodeServer(cfg)
 	before.localShutdownRunner = (&localShutdownCalls{}).run
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, before, crashAt)
 
 	after, ups := newEpisodeServer(cfg)

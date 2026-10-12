@@ -1,6 +1,7 @@
 package master
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -88,8 +89,8 @@ func TestDecodeUPSPacketReadsBatteryState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !status.OnBattery || status.BatteryCharge != 80 || status.RuntimeMinutes != 25 {
-		t.Fatalf("unexpected status %+v", status)
+	if want := (UPSStatus{OnBattery: true, BatteryCharge: new(80), RuntimeMinutes: new(25)}); !reflect.DeepEqual(status, want) {
+		t.Fatalf("status=%s want %s", formatUPSStatus(status), formatUPSStatus(want))
 	}
 }
 
@@ -218,8 +219,8 @@ func TestDecodeUPSPacketAppliesProfileValuesAndRuntimeUnits(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !status.OnBattery || status.BatteryCharge != 80 || status.RuntimeMinutes != tc.wantMinutes {
-				t.Fatalf("status=%+v want on battery, charge 80, runtime %d", status, tc.wantMinutes)
+			if want := (UPSStatus{OnBattery: true, BatteryCharge: new(80), RuntimeMinutes: new(tc.wantMinutes)}); !reflect.DeepEqual(status, want) {
+				t.Fatalf("status=%s want %s", formatUPSStatus(status), formatUPSStatus(want))
 			}
 		})
 	}
@@ -307,7 +308,7 @@ func TestDecodeUPSPacketAcceptsIntegerRuntimeWithTimeTicksUnit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if status.RuntimeMinutes != 15 {
-		t.Fatalf("runtime=%d want 15", status.RuntimeMinutes)
+	if status.RuntimeMinutes == nil || *status.RuntimeMinutes != 15 {
+		t.Fatalf("runtime=%v want 15", optionalInt(status.RuntimeMinutes))
 	}
 }

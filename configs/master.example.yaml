@@ -40,6 +40,8 @@ tls:
 # 同一次断电里,后命中的策略并入同一条命令:下面的例子先关 dev 节点,续航低于 5 分钟时再关全部。
 # duration: 条件需连续满足这么久才触发(默认 0,立即触发);轮询失败不清零也不触发。
 # when.ups_unreachable_for: 断电期间 UPS 连续这么久没有应答就触发;只能单独使用,不能与其他条件或 duration 组合。
+# when.low_battery: true: upsd 报 LB(UPS 自己判定电量低)时成立,只能用于下面的 nut 数据源。
+# UPS 不报电量或续航时,charge_below / runtime_below 永远不成立。
 shutdown_policies:
   - name: dev-early
     when:
@@ -82,6 +84,7 @@ local_shutdown:
   emergency_runtime_minutes: 3
   # 断电期间 UPS 失联多久后按紧急处理(默认等于 max_wait)。
   unreachable_after: "15m"
+# UPS 数据来源:snmp 与 nut 二选一。
 snmp:
   target: "192.168.1.10"
   port: 161
@@ -101,3 +104,10 @@ snmp:
   # auth_passphrase: "replace-with-auth-passphrase"
   # priv_protocol: AES
   # priv_passphrase: "replace-with-priv-passphrase"
+# 只有 USB 口的 UPS:先由 NUT 的 upsd 接管,删掉上面的 snmp 块,改用 nut。
+# master 只读变量、不登录 upsd,所以没有账号密码;upsd 走电池时报 LB 也会触发 master 的紧急关机。
+# nut:
+#   host: "127.0.0.1"
+#   port: 3493
+#   ups: "myups"          # ups.conf 里的 UPS 名
+#   timeout_seconds: 2

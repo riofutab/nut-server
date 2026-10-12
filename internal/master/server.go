@@ -48,7 +48,7 @@ type Server struct {
 	lastNodeRetryAt     time.Time
 	localShutdown       *localShutdownState
 	localShutdownRunner func(command []string, trigger string, dryRun bool) error
-	upsReader           func(config.SNMPConfig) (UPSStatus, error)
+	upsReader           func() (UPSStatus, error)
 	checkShutdown       func(ctx context.Context, argv []string) error
 	// localCommandReady is the startup self-check result of the local shutdown
 	// command (nil = not checked). Written in Run before the admin server
@@ -56,7 +56,10 @@ type Server struct {
 	localCommandReady *bool
 	upsMu             sync.RWMutex
 	upsStatus         *protocol.UPSStatusView
-	tlsConfig         *tls.Config
+	// upsMissingWarned holds the optional variables already logged as
+	// missing, so a UPS without them warns once instead of every poll.
+	upsMissingWarned map[string]bool
+	tlsConfig        *tls.Config
 	// State persistence. persistSeq is bumped under commandMu when a snapshot is
 	// taken; the disk write runs under persistMu (NOT commandMu) so the fsync no
 	// longer blocks readers or the command-watcher tick. persistedSeq guards
@@ -116,12 +119,12 @@ func NewServer(cfg config.MasterConfig) *Server {
 		enrollmentHashes: hashTokens(cfg.EnrollmentTokens),
 	}
 	server.localShutdownRunner = server.runLocalShutdownCommand
-	server.upsReader = ReadUPSStatus
+	server.upsReader = server.readUPS
 	server.checkShutdown = func(ctx context.Context, argv []string) error {
 		return shutdowncheck.Check(ctx, argv, nil)
 	}
-	if cfg.SNMP.Target != "" {
-		server.upsStatus = &protocol.UPSStatusView{Target: cfg.SNMP.Target}
+	if target := server.upsTarget(); target != "" {
+		server.upsStatus = &protocol.UPSStatusView{Source: server.upsSource(), Target: target}
 	}
 	server.loadState()
 	return server
@@ -144,8 +147,10 @@ func (s *Server) listen() (net.Listener, error) {
 func (s *Server) Run(ctx context.Context) error {
 	// LoadMasterConfig already resolves these; a config built in code (tests,
 	// embedding) would otherwise poll with nil OIDs.
-	if err := config.ResolveSNMPVars(&s.cfg.SNMP); err != nil {
-		return err
+	if !s.cfg.UsesNUT() {
+		if err := config.ResolveSNMPVars(&s.cfg.SNMP); err != nil {
+			return err
+		}
 	}
 	s.runLocalShutdownSelfCheck(ctx)
 	adminTLS, err := s.cfg.AdminTLS.TLSConfig()

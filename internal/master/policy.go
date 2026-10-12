@@ -44,15 +44,19 @@ func buildPolicyMatch(policies []config.ShutdownPolicySpec, names []string) Poli
 
 // policyMatches reports whether an on-battery reading satisfies a policy's
 // reading conditions. ups_unreachable_for policies are decided by the absence
-// of readings and never match one.
+// of readings and never match one. A condition on a value the UPS does not
+// report never holds.
 func policyMatches(status UPSStatus, when config.ShutdownPolicyWhen) bool {
 	if when.UPSUnreachableFor.Duration > 0 {
 		return false
 	}
-	if when.ChargeBelow > 0 && status.BatteryCharge > when.ChargeBelow {
+	if when.ChargeBelow > 0 && (status.BatteryCharge == nil || *status.BatteryCharge > when.ChargeBelow) {
 		return false
 	}
-	if when.RuntimeBelow > 0 && status.RuntimeMinutes > when.RuntimeBelow {
+	if when.RuntimeBelow > 0 && (status.RuntimeMinutes == nil || *status.RuntimeMinutes > when.RuntimeBelow) {
+		return false
+	}
+	if when.LowBattery && !status.LowBattery {
 		return false
 	}
 	return true

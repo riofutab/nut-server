@@ -27,7 +27,8 @@ func (s *Server) runCommandWatcher(ctx context.Context) {
 }
 
 func (s *Server) emergencyRuntimeReached(upsStatus *UPSStatus) bool {
-	return upsStatus != nil && upsStatus.OnBattery && upsStatus.RuntimeMinutes >= 0 && upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes
+	return upsStatus != nil && upsStatus.OnBattery && upsStatus.RuntimeMinutes != nil &&
+		*upsStatus.RuntimeMinutes >= 0 && *upsStatus.RuntimeMinutes < s.cfg.LocalShutdown.EmergencyRuntimeMinutes
 }
 
 // emergencyTrigger returns why the master must power off right away, or "".
@@ -36,6 +37,11 @@ func (s *Server) emergencyRuntimeReached(upsStatus *UPSStatus) bool {
 func (s *Server) emergencyTrigger(upsStatus *UPSStatus, now time.Time) string {
 	if s.emergencyRuntimeReached(upsStatus) {
 		return protocol.LocalShutdownTriggerEmergencyRuntime
+	}
+	// LB is the UPS's own critical-battery verdict and the only one a UPS
+	// without battery.runtime gives.
+	if upsStatus != nil && upsStatus.OnBattery && upsStatus.LowBattery {
+		return protocol.LocalShutdownTriggerLowBattery
 	}
 	unreachableAfter := s.cfg.LocalShutdown.UnreachableAfter.Duration
 	if silentFor, silent := s.upsSilentFor(now); silent && unreachableAfter > 0 && silentFor >= unreachableAfter {

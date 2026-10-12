@@ -8,13 +8,35 @@ import (
 	"nut-server/internal/protocol"
 )
 
+func (s *Server) readUPS() (UPSStatus, error) {
+	if s.cfg.UsesNUT() {
+		return ReadNUTStatus(s.cfg.NUT)
+	}
+	return ReadSNMPStatus(s.cfg.SNMP)
+}
+
+func (s *Server) upsSource() string {
+	if s.cfg.UsesNUT() {
+		return protocol.UPSSourceNUT
+	}
+	return protocol.UPSSourceSNMP
+}
+
+// upsTarget names the polled UPS in logs and /status; "" when unconfigured.
+func (s *Server) upsTarget() string {
+	if s.cfg.UsesNUT() {
+		return s.cfg.NUT.Address()
+	}
+	return s.cfg.SNMP.Target
+}
+
 func (s *Server) runPollingLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.PollInterval.Duration)
 	defer ticker.Stop()
 
 	for {
 		if err := s.evaluateUPS(time.Now().UTC()); err != nil {
-			slog.Error("poll UPS failed", "target", s.cfg.SNMP.Target, "err", err)
+			slog.Error("poll UPS failed", "target", s.upsTarget(), "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -26,7 +48,7 @@ func (s *Server) runPollingLoop(ctx context.Context) {
 
 func (s *Server) evaluateUPS(polledAt time.Time) error {
 	started := time.Now()
-	status, err := s.upsReader(s.cfg.SNMP)
+	status, err := s.upsReader()
 	recordUPSPollDuration(time.Since(started).Seconds())
 	if err != nil {
 		s.recordUPSError(err, polledAt)
@@ -73,20 +95,22 @@ func (s *Server) upsSilentFor(now time.Time) (time.Duration, bool) {
 
 func (s *Server) latestSuccessfulUPSStatus() *UPSStatus {
 	view := s.currentUPSStatus()
-	if view == nil || view.LastSuccessAt == nil || view.RuntimeMinutes == nil {
+	if view == nil || view.LastSuccessAt == nil {
 		return nil
 	}
 	if view.LastErrorAt != nil && !view.LastSuccessAt.After(*view.LastErrorAt) {
 		return nil
 	}
+	// currentUPSStatus returns copies, so the pointers are not shared.
 	status := &UPSStatus{
-		RuntimeMinutes: *view.RuntimeMinutes,
+		BatteryCharge:  view.BatteryCharge,
+		RuntimeMinutes: view.RuntimeMinutes,
 	}
 	if view.OnBattery != nil {
 		status.OnBattery = *view.OnBattery
 	}
-	if view.BatteryCharge != nil {
-		status.BatteryCharge = *view.BatteryCharge
+	if view.LowBattery != nil {
+		status.LowBattery = *view.LowBattery
 	}
 	return status
 }
@@ -96,27 +120,72 @@ func (s *Server) recordUPSSuccess(status UPSStatus, polledAt time.Time) {
 	defer s.upsMu.Unlock()
 
 	onBattery := status.OnBattery
-	batteryCharge := status.BatteryCharge
-	runtimeMinutes := status.RuntimeMinutes
 
 	if s.upsStatus == nil {
 		s.upsStatus = &protocol.UPSStatusView{}
 	}
-	s.upsStatus.Target = s.cfg.SNMP.Target
+	s.upsStatus.Source = s.upsSource()
+	s.upsStatus.Target = s.upsTarget()
 	s.upsStatus.OnBattery = &onBattery
-	s.upsStatus.BatteryCharge = &batteryCharge
-	s.upsStatus.RuntimeMinutes = &runtimeMinutes
+	s.upsStatus.LowBattery = nil
+	if s.cfg.UsesNUT() {
+		lowBattery := status.LowBattery
+		s.upsStatus.LowBattery = &lowBattery
+	}
+	s.upsStatus.BatteryCharge = copyInt(status.BatteryCharge)
+	s.upsStatus.RuntimeMinutes = copyInt(status.RuntimeMinutes)
 	s.upsStatus.LastSuccessAt = &polledAt
 	s.upsStatus.LastError = ""
 	s.upsStatus.LastErrorAt = nil
+	s.warnMissingUPSVarsLocked(status)
 
 	if s.cfg.LogUPSStatus {
 		slog.Info("ups status",
-			"target", s.cfg.SNMP.Target,
+			"target", s.upsTarget(),
 			"on_battery", status.OnBattery,
-			"charge", status.BatteryCharge,
-			"runtime_minutes", status.RuntimeMinutes)
+			"low_battery", status.LowBattery,
+			"charge", optionalInt(status.BatteryCharge),
+			"runtime_minutes", optionalInt(status.RuntimeMinutes))
 	}
+}
+
+// warnMissingUPSVarsLocked logs once per variable the UPS does not report,
+// since every condition on it silently never fires.
+func (s *Server) warnMissingUPSVarsLocked(status UPSStatus) {
+	missing := []struct {
+		name     string
+		isAbsent bool
+		effect   string
+	}{
+		{"battery.charge", status.BatteryCharge == nil, "charge_below policies will not fire"},
+		{"battery.runtime", status.RuntimeMinutes == nil, "runtime_below policies and local_shutdown.emergency_runtime_minutes will not fire"},
+	}
+	for _, m := range missing {
+		if !m.isAbsent || s.upsMissingWarned[m.name] {
+			continue
+		}
+		if s.upsMissingWarned == nil {
+			s.upsMissingWarned = make(map[string]bool)
+		}
+		s.upsMissingWarned[m.name] = true
+		slog.Warn("UPS does not report "+m.name+"; "+m.effect, "target", s.upsTarget())
+	}
+}
+
+func copyInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+// optionalInt renders a missing reading as "-" in logs instead of a pointer.
+func optionalInt(value *int) any {
+	if value == nil {
+		return "-"
+	}
+	return *value
 }
 
 func (s *Server) recordUPSError(err error, polledAt time.Time) {
@@ -126,7 +195,8 @@ func (s *Server) recordUPSError(err error, polledAt time.Time) {
 	if s.upsStatus == nil {
 		s.upsStatus = &protocol.UPSStatusView{}
 	}
-	s.upsStatus.Target = s.cfg.SNMP.Target
+	s.upsStatus.Source = s.upsSource()
+	s.upsStatus.Target = s.upsTarget()
 	s.upsStatus.LastError = err.Error()
 	s.upsStatus.LastErrorAt = &polledAt
 }
@@ -136,27 +206,27 @@ func (s *Server) currentUPSStatus() *protocol.UPSStatusView {
 	defer s.upsMu.RUnlock()
 
 	if s.upsStatus == nil {
-		if s.cfg.SNMP.Target == "" {
+		target := s.upsTarget()
+		if target == "" {
 			return nil
 		}
-		return &protocol.UPSStatusView{Target: s.cfg.SNMP.Target}
+		return &protocol.UPSStatusView{Source: s.upsSource(), Target: target}
 	}
 
 	view := &protocol.UPSStatusView{
-		Target:    s.upsStatus.Target,
-		LastError: s.upsStatus.LastError,
+		Source:         s.upsStatus.Source,
+		Target:         s.upsStatus.Target,
+		LastError:      s.upsStatus.LastError,
+		BatteryCharge:  copyInt(s.upsStatus.BatteryCharge),
+		RuntimeMinutes: copyInt(s.upsStatus.RuntimeMinutes),
 	}
 	if s.upsStatus.OnBattery != nil {
 		onBattery := *s.upsStatus.OnBattery
 		view.OnBattery = &onBattery
 	}
-	if s.upsStatus.BatteryCharge != nil {
-		batteryCharge := *s.upsStatus.BatteryCharge
-		view.BatteryCharge = &batteryCharge
-	}
-	if s.upsStatus.RuntimeMinutes != nil {
-		runtimeMinutes := *s.upsStatus.RuntimeMinutes
-		view.RuntimeMinutes = &runtimeMinutes
+	if s.upsStatus.LowBattery != nil {
+		lowBattery := *s.upsStatus.LowBattery
+		view.LowBattery = &lowBattery
 	}
 	if s.upsStatus.LastSuccessAt != nil {
 		lastSuccessAt := *s.upsStatus.LastSuccessAt

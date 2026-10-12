@@ -10,10 +10,14 @@ import (
 	"nut-server/internal/config"
 )
 
+// UPSStatus is one successful reading. BatteryCharge and RuntimeMinutes are
+// nil when the source does not report them; LowBattery comes from the NUT
+// "LB" flag and is always false on SNMP.
 type UPSStatus struct {
 	OnBattery      bool
-	BatteryCharge  int
-	RuntimeMinutes int
+	LowBattery     bool
+	BatteryCharge  *int
+	RuntimeMinutes *int
 }
 
 var snmpAuthProtocols = map[string]gosnmp.SnmpV3AuthProtocol{
@@ -26,7 +30,7 @@ var snmpPrivProtocols = map[string]gosnmp.SnmpV3PrivProtocol{
 	"AES256": gosnmp.AES256, "AES192C": gosnmp.AES192C, "AES256C": gosnmp.AES256C,
 }
 
-func ReadUPSStatus(cfg config.SNMPConfig) (UPSStatus, error) {
+func ReadSNMPStatus(cfg config.SNMPConfig) (UPSStatus, error) {
 	client, err := newSNMPClient(cfg)
 	if err != nil {
 		return UPSStatus{}, err
@@ -82,10 +86,11 @@ func decodeUPSPacket(cfg config.SNMPConfig, packet *gosnmp.SnmpPacket) (UPSStatu
 		return UPSStatus{}, fmt.Errorf("read runtime oid: oid %s returns TimeTicks; set snmp.runtime.unit: timeticks", cfg.Runtime.OID)
 	}
 
+	runtimeMinutes := runtimeToMinutes(runtime, cfg.Runtime.Unit)
 	return UPSStatus{
 		OnBattery:      slices.Contains(cfg.OnBattery.Values, batteryState),
-		BatteryCharge:  charge,
-		RuntimeMinutes: runtimeToMinutes(runtime, cfg.Runtime.Unit),
+		BatteryCharge:  &charge,
+		RuntimeMinutes: &runtimeMinutes,
 	}, nil
 }
 

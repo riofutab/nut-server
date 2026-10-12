@@ -22,6 +22,8 @@ openssl rand -hex 24 | sudo tee /root/nut-enroll-token   # 记下来，装 slave
 sudo ./scripts/quick-install-master.sh --token-file /root/nut-enroll-token --snmp-target 10.0.0.31
 ```
 
+UPS 只有 USB 口、由 NUT 的 upsd 接管时，把 `--snmp-target 10.0.0.31` 换成 `--nut-ups myups@10.0.0.5`（`upsc` 的写法，端口不是 3493 时写成 `myups@10.0.0.5:3494`），生成的配置改用 `nut` 数据源，并多一条 `when.low_battery` 策略。
+
 `--token-file` 指向存放 enrollment token 的文件（只需 root 可读），token 写入 `enrollment_tokens`，slave 首次注册时使用；token 不出现在命令行参数里。`admin_token` 由脚本自动生成，不能从命令行传入。`install-master.sh` 会创建 `nut-server` 用户、生成 `/etc/nut-server/master.yaml`（首次安装时自动写入随机 `admin_token`）、安装 systemd unit 并配置好沙箱。`master.yaml` 是符号链接时脚本拒绝执行。新二进制先放到临时位置，以 `nut-server` 用户运行 `-check-config`，通过后才替换已安装的二进制，不通过就中止、保留原二进制；服务已在运行时会重启到新版本。
 
 启用 TLS 时追加 `--tls-cert-file` / `--tls-key-file`；mTLS 再加 `--tls-ca-file --tls-require-client-cert`。内网无需 TLS 可用 `--disable-tls`。
@@ -68,9 +70,9 @@ local_shutdown:
   emergency_runtime_minutes: 3
 ```
 
-master 会等远端节点完成（或超时、或紧急阈值触发）后关本机，不需要在 master 上再装一个 slave。断电期间 UPS 连续 `local_shutdown.unreachable_after`（默认等于 `max_wait`）没有应答时，master 也按紧急情况关本机，`/status` 里的 trigger 为 `ups_unreachable`。master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时；但如果 master 是在这次断电中自己真实关机后再开机的，读到 UPS 之前不启用失联兜底，因为这种开机通常是市电已恢复，UPS 网卡还在启动。`/status` 的 `local_shutdown` 字段会暴露当前阶段。
+master 会等远端节点完成（或超时、或紧急阈值触发）后关本机，不需要在 master 上再装一个 slave。断电期间 UPS 连续 `local_shutdown.unreachable_after`（默认等于 `max_wait`）没有应答时，master 也按紧急情况关本机，`/status` 里的 trigger 为 `ups_unreachable`；用 `nut` 数据源时，断电期间 upsd 报 `LB` 同样按紧急情况处理，trigger 为 `low_battery`。master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时；但如果 master 是在这次断电中自己真实关机后再开机的，读到 UPS 之前不启用失联兜底，因为这种开机通常是市电已恢复，UPS 网卡还在启动。`/status` 的 `local_shutdown` 字段会暴露当前阶段。
 
-只有目标为全部节点的命令会启动这个流程；只关部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes` 或 UPS 失联超过 `unreachable_after` 时，即使还没有任何策略触发，master 也会关本机。命令带 `dry_run` 时本机关机同样只模拟。市电恢复会取消尚未开始的本机关机；执行失败每 30s 重试一次。
+只有目标为全部节点的命令会启动这个流程；只关部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes`、upsd 报 `LB` 或 UPS 失联超过 `unreachable_after` 时，即使还没有任何策略触发，master 也会关本机。命令带 `dry_run` 时本机关机同样只模拟。市电恢复会取消尚未开始的本机关机；执行失败每 30s 重试一次。
 
 ## 管理接口
 
@@ -110,7 +112,7 @@ scrape_configs:
       - targets: ["127.0.0.1:9001"]
 ```
 
-主要指标:`nut_master_ups_poll_total{result}`、`nut_master_ups_on_battery`、`nut_master_ups_battery_charge_percent`、`nut_master_ups_runtime_minutes`、`nut_master_registered_slaves`、`nut_master_nodes{state}`、`nut_master_shutdowns_issued_total`、`nut_master_shutdown_acks_total{status}`、`nut_master_shutdown_active`、`nut_master_local_shutdown_phase{phase}`、`nut_master_register_attempts_total{result}`（`result` 取 `accepted` / `enrolled` / `rejected` / `invalid`，`enrolled` 表示本次注册签发了专属 token）。
+主要指标:`nut_master_ups_poll_total{result}`、`nut_master_ups_on_battery`、`nut_master_ups_low_battery`（只有 `nut` 数据源）、`nut_master_ups_battery_charge_percent`、`nut_master_ups_runtime_minutes`（UPS 不报时不导出）、`nut_master_registered_slaves`、`nut_master_nodes{state}`、`nut_master_shutdowns_issued_total`、`nut_master_shutdown_acks_total{status}`、`nut_master_shutdown_active`、`nut_master_local_shutdown_phase{phase}`、`nut_master_register_attempts_total{result}`（`result` 取 `accepted` / `enrolled` / `rejected` / `invalid`，`enrolled` 表示本次注册签发了专属 token）。
 
 ## 节点注册与专属 token
 

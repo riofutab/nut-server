@@ -41,7 +41,7 @@ func TestCompletedDryRunDrillDoesNotBlockLocalShutdownInLaterOutage(t *testing.T
 	slave := newFakeSlave(t, server, "node-1")
 	completeDryRunDrill(t, server, slave, calls)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, time.Now().UTC())
 	message := slave.expectShutdown(t)
 	server.recordShutdownUpdate(protocol.ShutdownAckMessage{
@@ -66,7 +66,7 @@ func TestEmergencyRunsAfterCompletedDryRunDrill(t *testing.T) {
 	slave := newFakeSlave(t, server, "node-1")
 	completeDryRunDrill(t, server, slave, calls)
 
-	reading := UPSStatus{OnBattery: true, BatteryCharge: 15, RuntimeMinutes: 3}
+	reading := UPSStatus{OnBattery: true, BatteryCharge: new(15), RuntimeMinutes: new(3)}
 	ups.set(reading)
 	now := time.Now().UTC()
 	pollAt(t, server, now)
@@ -93,7 +93,7 @@ func TestEmergencyDuringPendingDryRunDrillRunsRealShutdown(t *testing.T) {
 	}()
 	slave.expectShutdown(t)
 
-	reading := UPSStatus{OnBattery: true, BatteryCharge: 15, RuntimeMinutes: 3}
+	reading := UPSStatus{OnBattery: true, BatteryCharge: new(15), RuntimeMinutes: new(3)}
 	ups.set(reading)
 	now := time.Now().UTC()
 	pollAt(t, server, now)
@@ -141,7 +141,7 @@ func TestResetDuringOutageIsNotUndoneByNextPoll(t *testing.T) {
 	})
 	slave := newFakeSlave(t, server, "node-1")
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	slave.expectShutdown(t)
 
@@ -163,12 +163,12 @@ func TestPolicyNotYetFiredStillFiresAfterResetDuringOutage(t *testing.T) {
 	})
 	slave := newFakeSlave(t, server, "dev-1", "dev")
 	t0 := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	slave.expectShutdown(t)
 	server.ResetActiveCommand()
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 10, RuntimeMinutes: 5})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(10), RuntimeMinutes: new(5)})
 	pollAt(t, server, t0.Add(time.Minute))
 
 	message := slave.expectShutdown(t)
@@ -186,7 +186,7 @@ func TestLinePowerCancelsFailedEmergencyArmedBeforeEpisodeCommand(t *testing.T) 
 	})
 	calls := &localShutdownCalls{errs: []error{errors.New("polkit refused")}}
 	server.localShutdownRunner = calls.run
-	reading := UPSStatus{OnBattery: true, BatteryCharge: 15, RuntimeMinutes: 3}
+	reading := UPSStatus{OnBattery: true, BatteryCharge: new(15), RuntimeMinutes: new(3)}
 	ups.set(reading)
 	now := time.Now().UTC()
 	pollAt(t, server, now)
@@ -194,13 +194,13 @@ func TestLinePowerCancelsFailedEmergencyArmedBeforeEpisodeCommand(t *testing.T) 
 	if phase := server.Status().LocalShutdown.Phase; phase != protocol.LocalShutdownPhaseFailed {
 		t.Fatalf("expected the emergency to fail, got %q", phase)
 	}
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 5, RuntimeMinutes: 3})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(5), RuntimeMinutes: new(3)})
 	pollAt(t, server, now.Add(time.Second))
 	if server.Status().Episode.CommandID == "" {
 		t.Fatal("expected dev-late to create the episode command")
 	}
 
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 5, RuntimeMinutes: 3})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(5), RuntimeMinutes: new(3)})
 	pollAt(t, server, now.Add(2*time.Second))
 	server.evaluateLocalShutdown(now.Add(shutdownRetryInterval+time.Minute), server.latestSuccessfulUPSStatus())
 
@@ -215,7 +215,7 @@ func TestLinePowerCancelsFailedEmergencyArmedBeforeEpisodeCommand(t *testing.T) 
 func TestEmergencyRuntimeIgnoresLinePowerReading(t *testing.T) {
 	server, _ := newEpisodeServer(config.MasterConfig{LocalShutdown: enabledLocalShutdown()})
 
-	trigger := server.emergencyTrigger(&UPSStatus{OnBattery: false, BatteryCharge: 15, RuntimeMinutes: 3}, time.Now().UTC())
+	trigger := server.emergencyTrigger(&UPSStatus{OnBattery: false, BatteryCharge: new(15), RuntimeMinutes: new(3)}, time.Now().UTC())
 
 	if trigger != "" {
 		t.Fatalf("expected no emergency on line power, got %q", trigger)
@@ -235,7 +235,7 @@ func TestRestoredEpisodeAdoptsNodeThatReconnectedBeforeFirstReading(t *testing.T
 	}
 	slave.expectNothing(t)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 80, RuntimeMinutes: 50})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(80), RuntimeMinutes: new(50)})
 	pollAt(t, server, t0.Add(11*time.Minute))
 	server.retryEpisodeShutdown(t0.Add(11*time.Minute + time.Second))
 
@@ -253,7 +253,7 @@ func TestRetriedNodeThatStallsTimesOutAgain(t *testing.T) {
 	})
 	slave := newFakeSlave(t, server, "node-1")
 	t0 := time.Now().UTC()
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, server, t0)
 	message := slave.expectShutdown(t)
 	server.recordShutdownUpdate(protocol.ShutdownAckMessage{
@@ -282,7 +282,7 @@ func TestRestoredFiredUnreachablePolicyConfirmsEpisodeWhileUPSStaysSilent(t *tes
 		},
 	}
 	before, ups := newEpisodeServer(cfg)
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, before, t0)
 	failPollAt(t, before, ups, t0.Add(2*time.Minute))
 	if fired := before.Status().Episode.FiredPolicies; len(fired) != 1 {
@@ -315,7 +315,7 @@ func poweredOffMaster(t *testing.T, t0, restartAt time.Time) (*Server, *fakeUPS,
 	before, ups := newEpisodeServer(cfg)
 	beforeCalls := &localShutdownCalls{}
 	before.localShutdownRunner = beforeCalls.run
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	pollAt(t, before, t0)
 	before.evaluateLocalShutdown(t0.Add(16*time.Minute), before.latestSuccessfulUPSStatus())
 	if got := beforeCalls.snapshot(); len(got) != 1 || got[0].dryRun {
@@ -343,7 +343,7 @@ func TestMasterThatPoweredItselfOffWaitsForUPSReadingAfterBoot(t *testing.T) {
 	if got := calls.snapshot(); len(got) != 0 {
 		t.Fatalf("expected no local shutdown before the UPS answers, got %+v", got)
 	}
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 40, RuntimeMinutes: 20})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(40), RuntimeMinutes: new(20)})
 	pollAt(t, server, restartAt.Add(11*time.Minute))
 	if episode := server.Status().Episode; episode != nil {
 		t.Fatalf("expected the first reading on line power to end the episode, got %+v", episode)
@@ -355,7 +355,7 @@ func TestMasterThatPoweredItselfOffResumesFallbackAfterReadingOnBattery(t *testi
 	restartAt := t0.Add(time.Hour)
 	server, ups, calls := poweredOffMaster(t, t0, restartAt)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 30, RuntimeMinutes: 20})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(30), RuntimeMinutes: new(20)})
 	pollAt(t, server, restartAt.Add(time.Minute))
 	failPollAt(t, server, ups, restartAt.Add(7*time.Minute))
 	server.evaluateLocalShutdown(restartAt.Add(7*time.Minute), server.latestSuccessfulUPSStatus())
