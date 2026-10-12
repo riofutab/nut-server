@@ -48,6 +48,9 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
+          # Tags with a suffix (v0.6.0-rc.1) are pre-releases: GitHub does not
+          # list them as latest, so install-online.sh --version latest skips them.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             See the release notes below for details about this version and the packaged artifacts.
           body_path: .github/release-notes/${{ github.ref_name }}.md

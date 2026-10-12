@@ -159,6 +159,6 @@ curl -s .../status | jq '.local_shutdown'   # phase / trigger / last_error
 
 - v0.4.0+:占位 token 会**拒绝启动** —— 升级前先换成强随机值。
 - v0.5.0+:新增 `/healthz`、`/readyz`、`shutdown_command_timeout`、若干 SLI 指标(`shutdown_ack_latency_seconds`、`ups_poll_duration_seconds`、`ups_last_*_timestamp_seconds`)。全部向后兼容,留空走默认。
-- v0.6.0+:配置严格解析并删除旧字段,master 配置必须改写;slave 改用专属 token;`GET /install/slave` 改为 `POST /nodes/<node_id>/install-script`;安装脚本的 `--token` 改为 `--token-file`。master 与 slave 升级不分先后;未升级的 slave 继续用 enrollment token 注册,全部升级并显示 `enrolled: true` 后再把 `enrollment` 改成 `closed`。
+- v0.6.0+:配置严格解析并删除旧字段,master 配置必须改写;slave 改用专属 token;`GET /install/slave` 改为 `POST /nodes/<node_id>/install-script`;安装脚本的 `--token` 改为 `--token-file`。先升 master 再升 slave;未升级的 slave 继续用 enrollment token 注册,全部升级并显示 `enrolled: true` 后再把 `enrollment` 改成 `closed`。
 
 升级流程见 [upgrade.md](upgrade.md)。

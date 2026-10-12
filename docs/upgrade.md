@@ -25,15 +25,16 @@ sudo ./scripts/upgrade-slave.sh
 
 如果服务原本在跑，升级脚本会在替换文件后 `systemctl restart` 重启，不需要额外操作。
 
-## v0.5.2 → v0.6.0 升级注意
+## v0.5.1 → v0.6.0 升级注意
 
 v0.6.0 集中做了所有破坏性配置变更。master 的配置必须改写，slave 的配置不用改。
 
 ### 升级顺序
 
-master 和 slave 谁先升都可以，前提是两边都已经是 v0.5.2（v0.5.2 的 slave 在 dry-run 下回报 `simulated`，更早的 master 不认识）。
+v0.5.2 没有单独发布，它的修复都包含在 v0.6.0 里，所以下面「v0.5.1 → v0.5.2」一节的内容同样适用（sudoers 与 systemd unit 必须一起更新等）。
 
-- 新 slave 连旧 master：照常用配置里的 `token` 注册。
+**先升 master，再升 slave。** v0.6.0 的 slave 在 dry-run 下回报 `simulated`，v0.5.1 的 master 不认识这个状态，会把节点记为 timeout。反过来没有问题：
+
 - 旧 slave 连新 master：master 在 `register_ack` 里签发的 token 只有在 slave 回复 `token_stored` 后才生效。旧 slave 不会回复，所以它继续用 enrollment token 注册，`/status` 里显示为未注册（`enrolled: false`）。
 - 所有 slave 都升级并显示 `enrolled: true` 之后，才可以把 `enrollment` 改成 `closed`，否则未升级的 slave 会被拒（`enrollment closed`）。
 
@@ -62,7 +63,7 @@ sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-serv
 
 - **tar.gz 升级脚本**：先装 sudoers，再把新二进制放到临时位置，以 `nut-server` 用户（`runuser`，Debian/RHEL 系自带）跑 `-check-config`。不通过就删掉临时文件、保留旧二进制、不重启，并以退出码 1 结束。所以要先改好配置再跑升级脚本。
 - **`.deb` / `.rpm`**：v0.6.0 起，升级包时服务保持 enable；如果服务在运行，postinst 以 `nut-server` 用户跑 `-check-config`，通过就重启到新版本，不通过就不重启并打印警告，旧进程继续运行（但重启机器后会起不来）。所以同样要先改好配置再装包。
-  - 例外：从 v0.5.2 的包升级时，执行的是 v0.5.2 包里的旧 prerm，它仍会停止并 disable 服务。这一次装完新包、改好配置、`-check-config` 通过后，需要手动执行 `sudo systemctl enable --now nut-master`（slave 同理）。
+  - 例外：从 v0.5.x 的包升级时，执行的是旧包里的 prerm，它仍会停止并 disable 服务。这一次装完新包、改好配置、`-check-config` 通过后，需要手动执行 `sudo systemctl enable --now nut-master`（slave 同理）。
 
 ### per-node token 带来的行为变化
 
@@ -74,7 +75,7 @@ sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-serv
 - 取消预期节点的接口从 `DELETE /nodes/expect/<node_id>` 改为 `DELETE /nodes/<node_id>/expected`，调用旧路径的脚本需要修改。
 - 指标 `nut_master_register_attempts_total` 新增 `result="enrolled"`，表示本次注册签发了专属 token。
 
-## v0.5.1 → v0.5.2 升级注意
+## v0.5.1 → v0.5.2 升级注意（v0.5.2 未单独发布，内容并入 v0.6.0）
 
 v0.5.2 修复了「按随包 unit + sudoers 部署时真实关机必然失败」等问题，**强烈建议升级**。
 
