@@ -8,18 +8,21 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ["1.23.x"]
+        go-version: ["1.27.x"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: ${{ matrix.go-version }}
 
@@ -39,9 +42,136 @@ jobs:
         run: ./scripts/build-linux.sh
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nut-server-build-artifacts
           path: |
             dist/linux-amd64
             dist/linux-arm64
+
+  # Installs the .deb packages on a real systemd host and checks that the shipped
+  # unit + sudoers let the services pass their shutdown-command self-check.
+  #
+  # The runner cannot be powered off even though dry_run is false: the master
+  # polls SNMP at 127.0.0.1 where nothing listens, so it never gets a UPS status,
+  # never matches a policy, never issues a shutdown command to the slave and never
+  # runs local_shutdown. The self-check only runs `sudo -n -l`, which lists
+  # permissions without executing the command. The admin token is random and
+  # nothing calls the admin API.
+  packaging-smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.27.x"
+
+      - name: Install nfpm
+        env:
+          NFPM_VERSION: "2.41.3"
+          NFPM_DEB_SHA256: "f92bf886c0f96767abcdc17195449faadb93fb20105532609820a412b4b2a46f"
+        run: |
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+          echo "${NFPM_DEB_SHA256}  /tmp/nfpm.deb" | sha256sum -c -
+          sudo dpkg -i /tmp/nfpm.deb
+
+      - name: Build packages
+        run: VERSION=v0.0.0-ci ./scripts/package-release.sh
+
+      - name: Install and start nut-slave
+        run: |
+          sudo dpkg -i dist/release/nut-slave_0.0.0-ci_linux_amd64.deb
+          cat > /tmp/slave.yaml <<EOF
+          node_id: "ci-slave"
+          master_addr: "127.0.0.1:9000"
+          token: "$(openssl rand -hex 24)"
+          state_file: "/var/lib/nut-server/slave-state.json"
+          reconnect_interval: "5s"
+          dry_run: false
+          tls:
+            disabled: true
+          shutdown_command:
+            - "/usr/bin/sudo"
+            - "-n"
+            - "/sbin/shutdown"
+            - "-h"
+            - "now"
+          EOF
+          sudo install -o root -g nut-server -m 0640 /tmp/slave.yaml /etc/nut-server/slave.yaml
+          rm -f /tmp/slave.yaml
+          sudo systemctl start nut-slave
+
+      - name: Install and start nut-master
+        run: |
+          sudo dpkg -i dist/release/nut-master_0.0.0-ci_linux_amd64.deb
+          cat > /tmp/master.yaml <<EOF
+          listen_addr: "127.0.0.1:9000"
+          admin_listen_addr: "127.0.0.1:9001"
+          admin_token: "$(openssl rand -hex 24)"
+          state_file: "/var/lib/nut-server/master-state.json"
+          auth_tokens:
+            - "$(openssl rand -hex 24)"
+          poll_interval: "10s"
+          command_timeout: "30s"
+          dry_run: false
+          tls:
+            disabled: true
+          shutdown_policy:
+            require_on_battery: true
+            min_battery_charge: 30
+            min_runtime_minutes: 15
+            shutdown_reason: "UPS battery threshold reached"
+          local_shutdown:
+            enabled: true
+            command:
+              - "/usr/bin/sudo"
+              - "-n"
+              - "/sbin/shutdown"
+              - "-h"
+              - "now"
+            max_wait: "15m"
+            emergency_runtime_minutes: 5
+          snmp:
+            target: "127.0.0.1"
+            port: 161
+            community: "public"
+            version: "2c"
+            timeout_seconds: 2
+            output_source_oid: ".1.3.6.1.2.1.33.1.4.1.0"
+            charge_oid: ".1.3.6.1.2.1.33.1.2.4.0"
+            runtime_minutes_oid: ".1.3.6.1.2.1.33.1.2.3.0"
+          EOF
+          sudo install -o root -g nut-server -m 0640 /tmp/master.yaml /etc/nut-server/master.yaml
+          rm -f /tmp/master.yaml
+          sudo systemctl start nut-master
+
+      - name: Check shutdown command self-check
+        run: |
+          wait_self_check() {
+            unit="$1"
+            for _ in $(seq 1 20); do
+              log=$(sudo journalctl -u "$unit" -o cat --no-pager)
+              if printf '%s\n' "$log" | grep -q 'shutdown command self-check failed'; then
+                echo "::error::$unit shutdown command self-check failed"
+                printf '%s\n' "$log"
+                return 1
+              fi
+              if printf '%s\n' "$log" | grep -q 'shutdown command self-check passed'; then
+                echo "$unit shutdown command self-check passed"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::$unit did not report a shutdown command self-check within 20s"
+            sudo systemctl status "$unit" --no-pager || true
+            printf '%s\n' "$log"
+            return 1
+          }
+          status=0
+          wait_self_check nut-slave || status=1
+          wait_self_check nut-master || status=1
+          exit "$status"
