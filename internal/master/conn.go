@@ -53,8 +53,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	// issuedToken is set when this connection enrolls the node. It becomes the
-	// node's token only when the slave sends its first envelope after the ack,
-	// proving it stored the token; if the connection drops first it is dropped.
+	// node's token only when the slave reports token_stored; if the connection
+	// drops first, or the slave predates per-node tokens, it is discarded.
 	issuedToken, err := s.authenticateNode(register.NodeID, register.Token)
 	if err != nil {
 		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: err.Error()})
@@ -107,16 +107,21 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
-		if issuedToken != "" {
+		client.Touch()
+		s.directory.Touch(client.NodeID, time.Now().UTC())
+		if env.Type == protocol.TypeTokenStored {
+			if issuedToken == "" {
+				slog.Warn("ignore token_stored without an issued token", "node_id", client.NodeID)
+				continue
+			}
 			if err := s.confirmIssuedToken(client.NodeID, issuedToken); err != nil {
 				slog.Warn("discard issued token", "node_id", client.NodeID, "err", err)
 				return
 			}
 			issuedToken = ""
 			slog.Info("slave enrolled", "node_id", client.NodeID)
+			continue
 		}
-		client.Touch()
-		s.directory.Touch(client.NodeID, time.Now().UTC())
 		if err := s.handleEnvelope(client, env); err != nil {
 			slog.Error("handle envelope failed", "node_id", client.NodeID, "type", env.Type, "err", err)
 		}

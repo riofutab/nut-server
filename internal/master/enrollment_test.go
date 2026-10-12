@@ -106,6 +106,11 @@ func (f *wireSlave) pingAndWaitPong(t *testing.T) {
 	}
 }
 
+func (f *wireSlave) confirmTokenStored(t *testing.T) {
+	t.Helper()
+	f.send(t, protocol.TypeTokenStored, nil)
+}
+
 func registerOnce(t *testing.T, addr, nodeID, token string) protocol.RegisterAckMessage {
 	t.Helper()
 	ack := dialWireSlave(t, addr).register(t, nodeID, token)
@@ -122,7 +127,7 @@ func newEnrollmentServer(t *testing.T, enrollment string) *Server {
 	})
 }
 
-// enrollNode runs a full enrollment (register, then the confirming envelope)
+// enrollNode runs a full enrollment (register, then token_stored)
 // and returns the issued token plus the still-open connection.
 func enrollNode(t *testing.T, addr, nodeID string) (string, *wireSlave) {
 	t.Helper()
@@ -131,6 +136,7 @@ func enrollNode(t *testing.T, addr, nodeID string) (string, *wireSlave) {
 	if !ack.Accepted || ack.IssuedToken == "" {
 		t.Fatalf("expected accepted enrollment with issued token, got %+v", ack)
 	}
+	slave.confirmTokenStored(t)
 	slave.pingAndWaitPong(t)
 	return ack.IssuedToken, slave
 }
@@ -156,7 +162,7 @@ func waitForCondition(t *testing.T, label string, check func() bool) {
 	t.Fatalf("timed out waiting for %s", label)
 }
 
-func TestEnrollmentIssuesTokenThatBecomesNodeTokenOnFirstEnvelope(t *testing.T) {
+func TestEnrollmentIssuesTokenThatBecomesNodeTokenOnTokenStored(t *testing.T) {
 	server := newEnrollmentServer(t, config.EnrollmentOpen)
 	addr := serveConns(t, server)
 	slave := dialWireSlave(t, addr)
@@ -173,10 +179,11 @@ func TestEnrollmentIssuesTokenThatBecomesNodeTokenOnFirstEnvelope(t *testing.T) 
 		t.Fatal("node must not be enrolled before the slave confirms the issued token")
 	}
 
+	slave.confirmTokenStored(t)
 	slave.pingAndWaitPong(t)
 
 	if !nodeEnrolled(server, "node-1") {
-		t.Fatal("node should be enrolled after the first envelope following the ack")
+		t.Fatal("node should be enrolled after token_stored")
 	}
 	content, err := os.ReadFile(server.cfg.StateFile)
 	if err != nil {
@@ -359,5 +366,27 @@ func TestDeleteNodeDropsItsIssuedToken(t *testing.T) {
 	}
 	if server.isEnrolled("printer") {
 		t.Fatal("deleting a node must drop its issued token")
+	}
+}
+
+func TestSlaveThatIgnoresIssuedTokenStaysOnEnrollmentToken(t *testing.T) {
+	// A pre-v0.6 slave drops issued_token and only pings; the master must not
+	// bind the node to a token the slave never stored.
+	server := newEnrollmentServer(t, config.EnrollmentOpen)
+	addr := serveConns(t, server)
+	legacy := dialWireSlave(t, addr)
+	if ack := legacy.register(t, "node-1", testEnrollmentToken); !ack.Accepted {
+		t.Fatalf("expected enrollment accepted, got %+v", ack)
+	}
+
+	legacy.pingAndWaitPong(t)
+	_ = legacy.conn.Close()
+	again := registerOnce(t, addr, "node-1", testEnrollmentToken)
+
+	if nodeEnrolled(server, "node-1") {
+		t.Fatal("a ping must not confirm the issued token")
+	}
+	if !again.Accepted {
+		t.Fatalf("legacy slave should still register with the enrollment token, got %+v", again)
 	}
 }

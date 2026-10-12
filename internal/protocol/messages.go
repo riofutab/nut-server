@@ -10,6 +10,11 @@ const (
 	TypeShutdown    = "shutdown"
 	TypeShutdownAck = "shutdown_ack"
 	TypeError       = "error"
+	// TypeTokenStored (no payload) tells the master the slave has persisted
+	// the token issued in register_ack; only then does the master bind the
+	// node to it. Slaves that predate per-node tokens never send it and keep
+	// registering with the enrollment token.
+	TypeTokenStored = "token_stored"
 )
 
 const (

@@ -273,13 +273,13 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 		return fmt.Errorf("register rejected: %s", ack.Message)
 	}
 	if ack.IssuedToken != "" {
-		// Persist before sending anything: the master confirms the token on
-		// our next envelope, so it must never confirm a token we could lose.
+		// Persist before confirming: the master binds the node to the token on
+		// token_stored, so it must never bind a token we could lose.
 		if err := c.setIssuedToken(ack.IssuedToken); err != nil {
 			recordConnectAttempt("register_error")
 			return fmt.Errorf("store issued token: %w", err)
 		}
-		if err := session.Send(protocol.TypePing, protocol.PingMessage{SentAt: time.Now().UTC()}); err != nil {
+		if err := session.Send(protocol.TypeTokenStored, nil); err != nil {
 			recordConnectAttempt("register_error")
 			return fmt.Errorf("confirm issued token: %w", err)
 		}

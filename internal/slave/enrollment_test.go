@@ -128,8 +128,8 @@ func TestSlaveStoresIssuedTokenBeforeSendingAnythingElse(t *testing.T) {
 	if register.Token != configToken {
 		t.Fatalf("first register should use the config token, got %q", register.Token)
 	}
-	if next.Type != protocol.TypePing {
-		t.Fatalf("got %s want ping", next.Type)
+	if next.Type != protocol.TypeTokenStored {
+		t.Fatalf("got %s want token_stored", next.Type)
 	}
 	if got := string(readStateFile(t, stateFile)["issued_token"]); got != `"issued-1"` {
 		t.Fatalf("issued token must be persisted before the next envelope, got %s", got)
