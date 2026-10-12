@@ -12,19 +12,17 @@ ExecStart=/usr/local/bin/nut-master -config /etc/nut-server/master.yaml
 Restart=always
 RestartSec=5
 
-NoNewPrivileges=true
+# Deliberately absent: NoNewPrivileges, RestrictSUIDSGID, LockPersonality,
+# RestrictAddressFamilies, SystemCallArchitectures, SystemCallFilter,
+# RestrictNamespaces, PrivateDevices, ProtectKernelTunables/Modules/Logs,
+# ProtectClock, MemoryDenyWriteExecute, RestrictRealtime, DynamicUser.
+# For a non-root unit each of them implies NoNewPrivileges=yes (systemd.exec(5)),
+# which stops setuid sudo and makes `sudo -n /sbin/shutdown` fail.
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
 ReadWritePaths=/var/lib/nut-server
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-SystemCallArchitectures=native
 UMask=0027
 
 [Install]

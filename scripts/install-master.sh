@@ -141,6 +141,10 @@ else
     echo "--tls-ca-file is required when --tls-require-client-cert is set"
     exit 1
   fi
+  if [ -n "$TLS_CA_FILE" ] && [ "$TLS_REQUIRE_CLIENT_CERT" != "true" ]; then
+    echo "--tls-ca-file only applies with --tls-require-client-cert (master verifies slave certificates with it)"
+    exit 1
+  fi
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -204,7 +208,7 @@ for dir in /etc/nut-server /var/lib/nut-server; do
     exit 1
   fi
 done
-install -d -o nut-server -g nut-server -m 0750 /etc/nut-server
+install -d -o root -g nut-server -m 0750 /etc/nut-server
 install -d -o nut-server -g nut-server -m 0750 /var/lib/nut-server
 chown -R nut-server:nut-server /var/lib/nut-server
 install -m 0755 "$BIN_SOURCE" /usr/local/bin/nut-master
