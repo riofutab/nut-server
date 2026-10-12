@@ -1278,3 +1278,36 @@ func TestRunReturnsCleanlyWhenContextCancelled(t *testing.T) {
 		t.Fatal("Run did not return within 6s of context cancel")
 	}
 }
+
+func TestRunRejectsUnknownSNMPProfile(t *testing.T) {
+	server := NewServer(config.MasterConfig{SNMP: config.SNMPConfig{Target: "127.0.0.1", Profile: "no-such-vendor"}})
+
+	err := server.Run(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "snmp.profile") {
+		t.Fatalf("expected Run to reject an unknown profile, got %v", err)
+	}
+}
+
+func TestRunFillsSNMPDefaultsForConfigNotFromLoader(t *testing.T) {
+	server := NewServer(config.MasterConfig{
+		ListenAddr:      "127.0.0.1:0",
+		AdminListenAddr: "127.0.0.1:0",
+		PollInterval:    config.Duration{Duration: time.Hour},
+	})
+	server.upsReader = func(config.SNMPConfig) (UPSStatus, error) { return UPSStatus{}, errors.New("no ups") }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	snmp := server.cfg.SNMP
+	if snmp.OnBattery == nil || snmp.Charge == nil || snmp.Runtime == nil {
+		t.Fatalf("expected Run to fill SNMP OID defaults, got %+v", snmp)
+	}
+}

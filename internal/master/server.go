@@ -136,6 +136,11 @@ func (s *Server) listen() (net.Listener, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	// LoadMasterConfig already resolves these; a config built in code (tests,
+	// embedding) would otherwise poll with nil OIDs.
+	if err := config.ResolveSNMPVars(&s.cfg.SNMP); err != nil {
+		return err
+	}
 	s.runLocalShutdownSelfCheck(ctx)
 	adminTLS, err := loadAdminTLSConfig(s.cfg.AdminTLS)
 	if err != nil {
