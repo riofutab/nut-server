@@ -1,6 +1,7 @@
 package master
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,15 +17,15 @@ type PolicyMatch struct {
 	NodeIDs []string
 }
 
-func EvaluatePolicies(status UPSStatus, policies []config.ShutdownPolicySpec) (PolicyMatch, bool) {
-	var match PolicyMatch
+// buildPolicyMatch combines the targets and reasons of the named policies.
+func buildPolicyMatch(policies []config.ShutdownPolicySpec, names []string) PolicyMatch {
+	match := PolicyMatch{Names: append([]string(nil), names...)}
 	tagSet := map[string]struct{}{}
 	nodeSet := map[string]struct{}{}
 	for _, p := range policies {
-		if !policyMatches(status, p.When) {
+		if !slices.Contains(names, p.Name) {
 			continue
 		}
-		match.Names = append(match.Names, p.Name)
 		if p.Target.All {
 			match.All = true
 		}
@@ -35,17 +36,17 @@ func EvaluatePolicies(status UPSStatus, policies []config.ShutdownPolicySpec) (P
 			nodeSet[n] = struct{}{}
 		}
 	}
-	if len(match.Names) == 0 {
-		return PolicyMatch{}, false
-	}
 	match.Tags = sortedKeys(tagSet)
 	match.NodeIDs = sortedKeys(nodeSet)
-	match.Reason = buildPolicyReason(policies, match.Names)
-	return match, true
+	match.Reason = buildPolicyReason(policies, names)
+	return match
 }
 
+// policyMatches reports whether an on-battery reading satisfies a policy's
+// reading conditions. ups_unreachable_for policies are decided by the absence
+// of readings and never match one.
 func policyMatches(status UPSStatus, when config.ShutdownPolicyWhen) bool {
-	if when.OnBattery != nil && *when.OnBattery != status.OnBattery {
+	if when.UPSUnreachableFor.Duration > 0 {
 		return false
 	}
 	if when.ChargeBelow > 0 && status.BatteryCharge > when.ChargeBelow {

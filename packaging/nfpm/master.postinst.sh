@@ -38,8 +38,8 @@ fi
 if [ ! -f /etc/nut-server/master.yaml ]; then
   cp /etc/nut-server/master.example.yaml /etc/nut-server/master.yaml
   # Generate a strong admin_token (the example placeholder is rejected at load).
-  # auth_tokens is deliberately left as the placeholder so the operator must set
-  # a shared fleet secret — the master refuses to start until they do.
+  # enrollment_tokens is deliberately left as the placeholder so the operator
+  # must set a fleet secret — the master refuses to start until they do.
   admin_token=$(random_hex)
   sed -i "s|replace-with-strong-admin-token|${admin_token}|" /etc/nut-server/master.yaml
   # Use an absolute, sandbox-writable state path (the relative example default is
@@ -51,13 +51,35 @@ chmod 0640 /etc/nut-server/master.yaml
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
+  # Upgrade of a running service: restart onto the new binary only when the
+  # existing config passes its checks (as the service user, since sudo checks
+  # always pass for root). Otherwise the old process keeps running.
+  if systemctl is-active --quiet nut-master; then
+    if runuser -u nut-server -- /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml; then
+      systemctl restart nut-master
+      echo "nut-master restarted on the new version."
+    else
+      cat >&2 <<'EOF'
+
+WARNING: /etc/nut-server/master.yaml does not pass the new version's checks.
+nut-master was NOT restarted and is still running the previous version from memory;
+it will fail to start after a reboot. Fix the config (see docs/upgrade.md), then:
+  sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
+  sudo systemctl restart nut-master
+
+EOF
+    fi
+    exit 0
+  fi
 fi
 
 cat <<'EOF'
 
 nut-master installed.
 
-  Edit /etc/nut-server/master.yaml (admin_token, auth_tokens, snmp.target).
-  Then: sudo systemctl enable --now nut-master
+  Edit /etc/nut-server/master.yaml (enrollment_tokens, snmp.target,
+  shutdown_policies). Check it as the service user, then start:
+    sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
+    sudo systemctl enable --now nut-master
 
 EOF

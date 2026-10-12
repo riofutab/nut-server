@@ -13,7 +13,7 @@ func (s *Server) runPollingLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
-		if err := s.evaluateUPS(); err != nil {
+		if err := s.evaluateUPS(time.Now().UTC()); err != nil {
 			slog.Error("poll UPS failed", "target", s.cfg.SNMP.Target, "err", err)
 		}
 		select {
@@ -24,13 +24,14 @@ func (s *Server) runPollingLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) evaluateUPS() error {
-	polledAt := time.Now().UTC()
+func (s *Server) evaluateUPS(polledAt time.Time) error {
+	started := time.Now()
 	status, err := s.upsReader(s.cfg.SNMP)
-	recordUPSPollDuration(time.Since(polledAt).Seconds())
+	recordUPSPollDuration(time.Since(started).Seconds())
 	if err != nil {
 		s.recordUPSError(err, polledAt)
 		recordUPSPollResult(false)
+		s.evaluateEpisodePolicies(nil, polledAt)
 		return err
 	}
 	s.recordUPSSuccess(status, polledAt)
@@ -44,10 +45,27 @@ func (s *Server) evaluateUPS() error {
 	// powered, and a charge/runtime threshold there would shut down nodes that
 	// boot back up while the battery recharges.
 	s.startEpisodeIfNeeded(polledAt)
-	if match, triggered := EvaluatePolicies(status, s.cfg.ShutdownPolicies); triggered {
-		s.applyPolicyMatch(match, polledAt)
-	}
+	s.evaluateEpisodePolicies(&status, polledAt)
 	return nil
+}
+
+// upsSilentFor returns how long the UPS has not answered when the latest poll
+// failed. Silence counts from the last successful poll, or from process start
+// when the UPS has not answered since: a master restarted mid-outage must not
+// wait forever for a reading that never comes.
+func (s *Server) upsSilentFor(now time.Time) (time.Duration, bool) {
+	view := s.currentUPSStatus()
+	if view == nil || view.LastErrorAt == nil {
+		return 0, false
+	}
+	since := s.startedAt
+	if view.LastSuccessAt != nil {
+		if !view.LastErrorAt.After(*view.LastSuccessAt) {
+			return 0, false
+		}
+		since = *view.LastSuccessAt
+	}
+	return now.Sub(since), true
 }
 
 func (s *Server) latestSuccessfulUPSStatus() *UPSStatus {

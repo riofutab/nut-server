@@ -40,9 +40,6 @@ func newCommandID(now time.Time) string {
 func (s *Server) TriggerShutdown(request protocol.ShutdownRequest) (protocol.ShutdownMessage, protocol.CommandSummary, error) {
 	reason := strings.TrimSpace(request.Reason)
 	if reason == "" {
-		reason = s.cfg.ShutdownPolicy.ShutdownReason
-	}
-	if reason == "" {
 		reason = "shutdown requested"
 	}
 	timeout := s.cfg.CommandTimeout.Duration

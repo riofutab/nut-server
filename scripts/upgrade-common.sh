@@ -41,15 +41,28 @@ find_service_source() {
     "$ROOT_DIR/dist/linux-arm64/packaging/systemd/$name"
 }
 
+# The new binary checks the existing config before it replaces the installed
+# one, so a config the new release rejects leaves the running version alone.
+# The check runs as the service user so its sudo self-check sees the same
+# sudoers rules as the service; install the sudoers file first.
 install_binary_from_package() {
   name="$1"
+  config_file="$2"
   source_file=$(find_binary_source "$name" || true)
   if [ -z "$source_file" ]; then
     echo "$name binary not found near script"
     exit 1
   fi
   install -d /usr/local/bin
-  install -m 0755 "$source_file" "/usr/local/bin/$name"
+  staged="/usr/local/bin/.$name.new"
+  install -m 0755 "$source_file" "$staged"
+  if ! runuser -u nut-server -- "$staged" -check-config -config "$config_file"; then
+    rm -f "$staged"
+    echo "$config_file failed the $name config check; binary not replaced and $name not restarted"
+    echo "update the config (see docs/upgrade.md) and run this script again"
+    exit 1
+  fi
+  mv -f "$staged" "/usr/local/bin/$name"
 }
 
 install_service_from_package() {

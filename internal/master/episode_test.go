@@ -86,17 +86,28 @@ func (f *fakeSlave) expectNothing(t *testing.T) {
 type fakeUPS struct {
 	mu     sync.Mutex
 	status UPSStatus
+	err    error
 }
 
 func (u *fakeUPS) set(status UPSStatus) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.status = status
+	u.err = nil
+}
+
+func (u *fakeUPS) fail(err error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.err = err
 }
 
 func (u *fakeUPS) read(config.SNMPConfig) (UPSStatus, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.err != nil {
+		return UPSStatus{}, u.err
+	}
 	return u.status, nil
 }
 
@@ -159,14 +170,14 @@ func TestStagedPoliciesWidenTheEpisodeCommand(t *testing.T) {
 	web := newFakeSlave(t, server, "web-1", "web")
 
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	first := dev.expectShutdown(t)
 	web.expectNothing(t)
 
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 30, RuntimeMinutes: 3})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	second := web.expectShutdown(t)
@@ -193,7 +204,7 @@ func TestPoliciesAreNotEvaluatedOnLinePower(t *testing.T) {
 	slave := newFakeSlave(t, server, "node-1")
 
 	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 20, RuntimeMinutes: 10})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -254,14 +265,14 @@ func TestAutoTriggerWithoutConnectedSlavesStillPowersOffMasterAtMaxWait(t *testi
 	server, ups := newEpisodeServer(config.MasterConfig{
 		LocalShutdown: enabledLocalShutdown(),
 		ShutdownPolicies: []config.ShutdownPolicySpec{
-			{Name: "on-battery", When: config.ShutdownPolicyWhen{OnBattery: boolPtr(true)}, Target: config.ShutdownPolicyTarget{All: true}},
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
 		},
 	})
 	calls := &localShutdownCalls{}
 	server.localShutdownRunner = calls.run
 
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	status := server.Status()
@@ -283,12 +294,12 @@ func TestAutoTriggerWithoutConnectedSlavesStillPowersOffMasterAtMaxWait(t *testi
 func TestFailedNodeIsRetriedAndLaterSuccessReplacesFailure(t *testing.T) {
 	server, ups := newEpisodeServer(config.MasterConfig{
 		ShutdownPolicies: []config.ShutdownPolicySpec{
-			{Name: "on-battery", When: config.ShutdownPolicyWhen{OnBattery: boolPtr(true)}, Target: config.ShutdownPolicyTarget{All: true}},
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
 		},
 	})
 	slave := newFakeSlave(t, server, "node-1")
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	message := slave.expectShutdown(t)
@@ -313,12 +324,12 @@ func TestFailedNodeIsRetriedAndLaterSuccessReplacesFailure(t *testing.T) {
 func TestTagTargetedCommandAdoptsNodeThatReconnectsLater(t *testing.T) {
 	server, ups := newEpisodeServer(config.MasterConfig{
 		ShutdownPolicies: []config.ShutdownPolicySpec{
-			{Name: "dev", When: config.ShutdownPolicyWhen{OnBattery: boolPtr(true)}, Target: config.ShutdownPolicyTarget{Tags: []string{"dev"}}},
+			{Name: "dev", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{Tags: []string{"dev"}}},
 		},
 	})
 	first := newFakeSlave(t, server, "dev-1", "dev")
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	first.expectShutdown(t)
@@ -352,7 +363,7 @@ func TestRestoredEpisodeIsNotReplayedBeforeFirstUPSReading(t *testing.T) {
 	slave.expectNothing(t)
 
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 50, RuntimeMinutes: 20})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	go func() { _ = server.replayPendingShutdown(slave.client) }()
@@ -363,18 +374,18 @@ func TestLinePowerEndsEpisodeAndCancelsPendingLocalShutdown(t *testing.T) {
 	server, ups := newEpisodeServer(config.MasterConfig{
 		LocalShutdown: enabledLocalShutdown(),
 		ShutdownPolicies: []config.ShutdownPolicySpec{
-			{Name: "on-battery", When: config.ShutdownPolicyWhen{OnBattery: boolPtr(true)}, Target: config.ShutdownPolicyTarget{All: true}},
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
 		},
 	})
 	slave := newFakeSlave(t, server, "node-1")
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	slave.expectShutdown(t)
 
 	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 85, RuntimeMinutes: 55})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -400,7 +411,7 @@ func TestEmergencyRuntimePowersOffMasterWithoutAnyCommand(t *testing.T) {
 	server.localShutdownRunner = calls.run
 	reading := UPSStatus{OnBattery: true, BatteryCharge: 15, RuntimeMinutes: 3}
 	ups.set(reading)
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 
@@ -447,7 +458,7 @@ func TestFailedLocalShutdownIsRetriedAfterInterval(t *testing.T) {
 func TestAutoShutdownSupersedesActiveManualCommand(t *testing.T) {
 	server, ups := newEpisodeServer(config.MasterConfig{
 		ShutdownPolicies: []config.ShutdownPolicySpec{
-			{Name: "on-battery", When: config.ShutdownPolicyWhen{OnBattery: boolPtr(true)}, Target: config.ShutdownPolicyTarget{All: true}},
+			{Name: "on-battery", When: config.ShutdownPolicyWhen{}, Target: config.ShutdownPolicyTarget{All: true}},
 		},
 	})
 	slave := newFakeSlave(t, server, "node-1")
@@ -461,7 +472,7 @@ func TestAutoShutdownSupersedesActiveManualCommand(t *testing.T) {
 	manual := <-done
 
 	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
-	if err := server.evaluateUPS(); err != nil {
+	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 

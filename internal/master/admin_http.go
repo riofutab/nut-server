@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,7 +31,7 @@ func limitRequestBody(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) runAdminServer(ctx context.Context) {
+func (s *Server) adminMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -40,18 +41,34 @@ func (s *Server) runAdminServer(ctx context.Context) {
 	mux.HandleFunc("/commands/shutdown", s.requireAdminToken(s.handleManualShutdown))
 	mux.HandleFunc("/commands/reset", s.requireAdminToken(s.handleReset))
 	mux.HandleFunc("POST /nodes/expect", s.requireAdminToken(s.handleExpectNode))
-	mux.HandleFunc("DELETE /nodes/expect/{node_id}", s.requireAdminToken(s.handleUnsetExpected))
+	mux.HandleFunc("DELETE /nodes/{node_id}/expected", s.requireAdminToken(s.handleUnsetExpected))
+	mux.HandleFunc("DELETE /nodes/{node_id}/token", s.requireAdminToken(s.handleRevokeToken))
 	mux.HandleFunc("DELETE /nodes/{node_id}", s.requireAdminToken(s.handleDeleteNode))
-	mux.HandleFunc("GET /install/slave", s.requireAdminToken(s.handleInstallSlave))
+	mux.HandleFunc("POST /nodes/{node_id}/install-script", s.requireAdminToken(s.handleInstallScript))
+	return mux
+}
 
-	srv := &http.Server{Addr: s.cfg.AdminListenAddr, Handler: limitRequestBody(mux), ReadHeaderTimeout: adminReadHeaderTimeout}
+// runAdminServer serves plain HTTP when tlsConfig is nil.
+func (s *Server) runAdminServer(ctx context.Context, tlsConfig *tls.Config) {
+	srv := &http.Server{
+		Addr:              s.cfg.AdminListenAddr,
+		Handler:           limitRequestBody(s.adminMux()),
+		ReadHeaderTimeout: adminReadHeaderTimeout,
+		TLSConfig:         tlsConfig,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	var err error
+	if tlsConfig != nil {
+		err = srv.ListenAndServeTLS("", "")
+	} else {
+		err = srv.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("admin server stopped", "err", err)
 	}
 }
@@ -202,6 +219,7 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	}
 	switch s.directory.Delete(nodeID) {
 	case DeleteOK:
+		s.removeNodeToken(nodeID)
 		s.saveStateForDirectoryChange()
 		w.WriteHeader(http.StatusNoContent)
 	case DeleteNotFound:

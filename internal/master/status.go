@@ -31,6 +31,8 @@ func (s *Server) Status() protocol.StatusResponse {
 		clientMap[client.NodeID] = client
 	}
 
+	enrolled := s.nodeTokensSnapshot()
+
 	directoryEntries := s.directory.List()
 	metaByID := make(map[string]NodeMeta, len(directoryEntries))
 	knownNodes := make(map[string]struct{})
@@ -58,7 +60,8 @@ func (s *Server) Status() protocol.StatusResponse {
 
 	nodes := make([]protocol.NodeStatus, 0, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
-		node := protocol.NodeStatus{NodeID: nodeID, State: protocol.NodeStateNeverSeen}
+		_, isEnrolled := enrolled[nodeID]
+		node := protocol.NodeStatus{NodeID: nodeID, State: protocol.NodeStateNeverSeen, Enrolled: isEnrolled}
 		meta, hasMeta := metaByID[nodeID]
 		if hasMeta {
 			node.Hostname = meta.Hostname

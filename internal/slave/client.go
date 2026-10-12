@@ -40,6 +40,9 @@ const (
 	// maxRetainedCommandStates matches the master's maxRetainedCompletedCommands
 	// so every command the master may still replay keeps its slave-side state.
 	maxRetainedCommandStates = 200
+	// registerRejectInvalidToken is the master's register_ack message for a
+	// token it does not accept for this node.
+	registerRejectInvalidToken = "invalid token"
 )
 
 // dialTimeout is a variable only so tests can shorten it.
@@ -54,8 +57,11 @@ type Client struct {
 	shutdownReady *bool
 	commandMu     sync.Mutex
 	commandStates map[string]protocol.ShutdownAckMessage
-	executions    map[string]*shutdownExecution
-	tlsConfig     *tls.Config
+	// issuedToken is guarded by commandMu because it is persisted with the
+	// command states.
+	issuedToken string
+	executions  map[string]*shutdownExecution
+	tlsConfig   *tls.Config
 	// State persistence, mirroring the master: snapshot under commandMu, write
 	// under persistMu so the fsync never blocks command handling.
 	persistMu    sync.Mutex
@@ -235,10 +241,11 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 
 	session := newConnectionSession(conn)
 
+	token, usedIssuedToken := c.registerToken()
 	if err := session.Send(protocol.TypeRegister, protocol.RegisterMessage{
 		NodeID:        c.cfg.NodeID,
 		Hostname:      c.hostname,
-		Token:         c.cfg.Token,
+		Token:         token,
 		Tags:          c.cfg.Tags,
 		DryRun:        c.cfg.DryRun,
 		ShutdownReady: c.shutdownReady,
@@ -248,9 +255,35 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 	}
 
 	session.setReadDeadline(registerAckReadDeadline)
-	if err := c.expectRegisterAck(session.reader); err != nil {
+	ack, err := c.expectRegisterAck(session.reader)
+	if err != nil {
 		recordConnectAttempt("register_error")
 		return err
+	}
+	if !ack.Accepted {
+		recordConnectAttempt("register_error")
+		if usedIssuedToken && ack.Message == registerRejectInvalidToken {
+			// The master no longer knows the issued token (revoked, or its
+			// state was lost): enroll again with the config token next time.
+			slog.Warn("master rejected the issued token; falling back to the config token", "node_id", c.cfg.NodeID)
+			if err := c.setIssuedToken(""); err != nil {
+				slog.Error("clear issued token failed", "node_id", c.cfg.NodeID, "err", err)
+			}
+		}
+		return fmt.Errorf("register rejected: %s", ack.Message)
+	}
+	if ack.IssuedToken != "" {
+		// Persist before confirming: the master binds the node to the token on
+		// token_stored, so it must never bind a token we could lose.
+		if err := c.setIssuedToken(ack.IssuedToken); err != nil {
+			recordConnectAttempt("register_error")
+			return fmt.Errorf("store issued token: %w", err)
+		}
+		if err := session.Send(protocol.TypeTokenStored, nil); err != nil {
+			recordConnectAttempt("register_error")
+			return fmt.Errorf("confirm issued token: %w", err)
+		}
+		slog.Info("enrolled with master; stored issued token", "node_id", c.cfg.NodeID, "state_file", c.cfg.StateFile)
 	}
 	recordConnectAttempt("success")
 	setConnected(true)
@@ -282,22 +315,19 @@ func (c *Client) runOnce(parentCtx context.Context, onRegistered func()) error {
 	}
 }
 
-func (c *Client) expectRegisterAck(reader *bufio.Reader) error {
+func (c *Client) expectRegisterAck(reader *bufio.Reader) (protocol.RegisterAckMessage, error) {
 	env, err := protocol.ReadEnvelope(reader)
 	if err != nil {
-		return fmt.Errorf("read register ack: %w", err)
+		return protocol.RegisterAckMessage{}, fmt.Errorf("read register ack: %w", err)
 	}
 	if env.Type != protocol.TypeRegisterAck {
-		return fmt.Errorf("expected register_ack, got %s", env.Type)
+		return protocol.RegisterAckMessage{}, fmt.Errorf("expected register_ack, got %s", env.Type)
 	}
 	var ack protocol.RegisterAckMessage
 	if err := protocol.DecodePayload(env.Data, &ack); err != nil {
-		return err
+		return protocol.RegisterAckMessage{}, err
 	}
-	if !ack.Accepted {
-		return fmt.Errorf("register rejected: %s", ack.Message)
-	}
-	return nil
+	return ack, nil
 }
 
 // ackMessage builds a shutdown ack for this node; NodeID and AckedAt are
@@ -449,7 +479,7 @@ func (c *Client) setCommandState(update protocol.ShutdownAckMessage) {
 	c.pruneCommandStatesLocked()
 	seq, content := c.snapshotStateLocked()
 	c.commandMu.Unlock()
-	c.persistState(seq, content)
+	_ = c.persistState(seq, content)
 }
 
 // pruneCommandStatesLocked drops the oldest states (by AckedAt) beyond

@@ -1,7 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -15,22 +19,39 @@ import (
 // custom script into a bounded, retriable failure instead of a permanent stall.
 const DefaultShutdownCommandTimeout = 2 * time.Minute
 
-// Standard UPS-MIB (RFC 1628) OIDs used as SNMP defaults when the config leaves
-// them blank, so a stock UPS works out of the box.
+// maxChargePercent is the upper bound of a charge_below threshold.
+const maxChargePercent = 100
+
+// Units a runtime OID may report in; the master converts them to minutes.
 const (
-	defaultOutputSourceOID   = ".1.3.6.1.2.1.33.1.4.1.0" // upsOutputSource
-	defaultChargeOID         = ".1.3.6.1.2.1.33.1.2.4.0" // upsEstimatedChargeRemaining
-	defaultRuntimeMinutesOID = ".1.3.6.1.2.1.33.1.2.3.0" // upsEstimatedMinutesRemaining
+	RuntimeUnitMinutes   = "minutes"
+	RuntimeUnitSeconds   = "seconds"
+	RuntimeUnitTimeTicks = "timeticks" // 1/100 s
+)
+
+// Enrollment modes for slaves without an issued per-node token.
+const (
+	EnrollmentOpen   = "open"
+	EnrollmentClosed = "closed"
 )
 
 type MasterConfig struct {
-	ListenAddr       string               `yaml:"listen_addr"`
-	AdminListenAddr  string               `yaml:"admin_listen_addr"`
-	AdminToken       string               `yaml:"admin_token"`
-	PublicAddr       string               `yaml:"public_addr"`
-	InstallRepo      string               `yaml:"install_repo"`
-	StateFile        string               `yaml:"state_file"`
-	AuthTokens       []string             `yaml:"auth_tokens"`
+	ListenAddr      string         `yaml:"listen_addr"`
+	AdminListenAddr string         `yaml:"admin_listen_addr"`
+	AdminToken      string         `yaml:"admin_token"`
+	AdminTLS        AdminTLSConfig `yaml:"admin_tls"`
+	PublicAddr      string         `yaml:"public_addr"`
+	InstallRepo     string         `yaml:"install_repo"`
+	// InstallCAFile is the CA the install script writes to slaves as their
+	// trust anchor. Empty embeds tls.cert_file, which slaves then pin until the
+	// master certificate is replaced.
+	InstallCAFile string `yaml:"install_ca_file"`
+	StateFile     string `yaml:"state_file"`
+	// EnrollmentTokens admit a node_id that has no issued per-node token yet;
+	// the master then issues it one and the enrollment token can no longer
+	// register as that node.
+	EnrollmentTokens []string             `yaml:"enrollment_tokens"`
+	Enrollment       string               `yaml:"enrollment"`
 	PollInterval     Duration             `yaml:"poll_interval"`
 	CommandTimeout   Duration             `yaml:"command_timeout"`
 	OfflineAfter     Duration             `yaml:"offline_after"`
@@ -38,22 +59,32 @@ type MasterConfig struct {
 	LogUPSStatus     bool                 `yaml:"log_ups_status"`
 	TLS              TLSConfig            `yaml:"tls"`
 	LocalShutdown    LocalShutdownConfig  `yaml:"local_shutdown"`
-	ShutdownPolicy   ShutdownPolicy       `yaml:"shutdown_policy"`
 	ShutdownPolicies []ShutdownPolicySpec `yaml:"shutdown_policies"`
 	SNMP             SNMPConfig           `yaml:"snmp"`
 }
 
-type ShutdownPolicySpec struct {
-	Name   string               `yaml:"name"`
-	When   ShutdownPolicyWhen   `yaml:"when"`
-	Target ShutdownPolicyTarget `yaml:"target"`
-	Reason string               `yaml:"reason"`
+type AdminTLSConfig struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
 }
 
+type ShutdownPolicySpec struct {
+	Name string             `yaml:"name"`
+	When ShutdownPolicyWhen `yaml:"when"`
+	// Duration is how long the conditions must hold continuously before the
+	// policy fires; zero fires on the first matching poll.
+	Duration Duration             `yaml:"duration"`
+	Target   ShutdownPolicyTarget `yaml:"target"`
+	Reason   string               `yaml:"reason"`
+}
+
+// ShutdownPolicyWhen is evaluated only while the UPS is on battery, so an
+// empty When means "on battery". UPSUnreachableFor is exclusive: it fires when
+// the UPS has not answered for that long since a battery reading.
 type ShutdownPolicyWhen struct {
-	OnBattery    *bool `yaml:"on_battery"`
-	ChargeBelow  int   `yaml:"charge_below"`
-	RuntimeBelow int   `yaml:"runtime_below"`
+	ChargeBelow       int      `yaml:"charge_below"`
+	RuntimeBelow      int      `yaml:"runtime_below"`
+	UPSUnreachableFor Duration `yaml:"ups_unreachable_for"`
 }
 
 type ShutdownPolicyTarget struct {
@@ -68,26 +99,43 @@ type LocalShutdownConfig struct {
 	CommandTimeout          Duration `yaml:"command_timeout"`
 	MaxWait                 Duration `yaml:"max_wait"`
 	EmergencyRuntimeMinutes int      `yaml:"emergency_runtime_minutes"`
-	maxWaitSet              bool
-	emergencyRuntimeSet     bool
-}
-
-type ShutdownPolicy struct {
-	RequireOnBattery  bool   `yaml:"require_on_battery"`
-	MinBatteryCharge  int    `yaml:"min_battery_charge"`
-	MinRuntimeMinutes int    `yaml:"min_runtime_minutes"`
-	ShutdownReason    string `yaml:"shutdown_reason"`
+	// UnreachableAfter powers the master off when the UPS stops answering
+	// during an on-battery episode; defaults to MaxWait.
+	UnreachableAfter Duration `yaml:"unreachable_after"`
 }
 
 type SNMPConfig struct {
-	Target            string `yaml:"target"`
-	Port              uint16 `yaml:"port"`
-	Community         string `yaml:"community"`
-	Version           string `yaml:"version"`
-	TimeoutSeconds    int    `yaml:"timeout_seconds"`
-	OutputSourceOID   string `yaml:"output_source_oid"`
-	ChargeOID         string `yaml:"charge_oid"`
-	RuntimeMinutesOID string `yaml:"runtime_minutes_oid"`
+	Target         string `yaml:"target"`
+	Port           uint16 `yaml:"port"`
+	Version        string `yaml:"version"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	// Community is used by SNMP v1 / v2c.
+	Community string `yaml:"community"`
+	// USM settings, used by SNMP v3.
+	Username       string `yaml:"username"`
+	SecurityLevel  string `yaml:"security_level"`
+	AuthProtocol   string `yaml:"auth_protocol"`
+	AuthPassphrase string `yaml:"auth_passphrase"`
+	PrivProtocol   string `yaml:"priv_protocol"`
+	PrivPassphrase string `yaml:"priv_passphrase"`
+	// Profile selects vendor OID presets; OnBattery / Charge / Runtime
+	// override single entries. After loading all three are always set.
+	Profile   string        `yaml:"profile"`
+	OnBattery *SNMPStateVar `yaml:"on_battery"`
+	Charge    *SNMPValueVar `yaml:"charge"`
+	Runtime   *SNMPValueVar `yaml:"runtime"`
+}
+
+// SNMPStateVar is an OID whose value is compared against Values.
+type SNMPStateVar struct {
+	OID    string `yaml:"oid"`
+	Values []int  `yaml:"values"`
+}
+
+// SNMPValueVar is a numeric OID; Unit applies to runtime only.
+type SNMPValueVar struct {
+	OID  string `yaml:"oid"`
+	Unit string `yaml:"unit"`
 }
 
 type SlaveConfig struct {
@@ -133,25 +181,6 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("parse duration %q: %w", raw, err)
 	}
 	d.Duration = duration
-	return nil
-}
-
-func (c *LocalShutdownConfig) UnmarshalYAML(value *yaml.Node) error {
-	type rawLocalShutdownConfig LocalShutdownConfig
-	var raw rawLocalShutdownConfig
-	if err := value.Decode(&raw); err != nil {
-		return err
-	}
-	*c = LocalShutdownConfig(raw)
-	for i := 0; i+1 < len(value.Content); i += 2 {
-		key := value.Content[i].Value
-		switch key {
-		case "max_wait":
-			c.maxWaitSet = true
-		case "emergency_runtime_minutes":
-			c.emergencyRuntimeSet = true
-		}
-	}
 	return nil
 }
 
@@ -221,7 +250,8 @@ func (c TLSConfig) ValidateClient() error {
 
 func LoadMasterConfig(path string) (MasterConfig, error) {
 	var cfg MasterConfig
-	if err := loadYAML(path, &cfg); err != nil {
+	root, err := loadYAML(path, &cfg, removedMasterKeys)
+	if err != nil {
 		return MasterConfig{}, err
 	}
 	if cfg.ListenAddr == "" {
@@ -233,13 +263,20 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.StateFile == "" {
 		cfg.StateFile = "data/master-state.json"
 	}
-	if len(cfg.AuthTokens) == 0 {
-		return MasterConfig{}, fmt.Errorf("auth_tokens must not be empty")
-	}
-	for i, token := range cfg.AuthTokens {
-		if err := validateSecret(fmt.Sprintf("auth_tokens[%d]", i), token); err != nil {
+	for i, token := range cfg.EnrollmentTokens {
+		if err := validateSecret(fmt.Sprintf("enrollment_tokens[%d]", i), token); err != nil {
 			return MasterConfig{}, err
 		}
+	}
+	switch cfg.Enrollment {
+	case "":
+		cfg.Enrollment = EnrollmentOpen
+	case EnrollmentOpen, EnrollmentClosed:
+	default:
+		return MasterConfig{}, fmt.Errorf("enrollment %q is invalid; use %q or %q", cfg.Enrollment, EnrollmentOpen, EnrollmentClosed)
+	}
+	if cfg.Enrollment == EnrollmentOpen && len(cfg.EnrollmentTokens) == 0 {
+		return MasterConfig{}, fmt.Errorf("enrollment_tokens must not be empty while enrollment is open")
 	}
 	if cfg.AdminToken == "" {
 		return MasterConfig{}, fmt.Errorf("admin_token must not be empty")
@@ -262,13 +299,14 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if len(cfg.LocalShutdown.Command) == 0 {
 		cfg.LocalShutdown.Command = []string{"/sbin/shutdown", "-h", "now"}
 	}
-	if cfg.LocalShutdown.maxWaitSet && cfg.LocalShutdown.MaxWait.Duration <= 0 {
+	// An explicit zero must fail rather than silently become the default.
+	if findKey(root, "local_shutdown", "max_wait") != nil && cfg.LocalShutdown.MaxWait.Duration <= 0 {
 		return MasterConfig{}, fmt.Errorf("local_shutdown.max_wait must be greater than zero")
 	}
 	if cfg.LocalShutdown.MaxWait.Duration == 0 {
 		cfg.LocalShutdown.MaxWait.Duration = 15 * time.Minute
 	}
-	if cfg.LocalShutdown.emergencyRuntimeSet && cfg.LocalShutdown.EmergencyRuntimeMinutes <= 0 {
+	if findKey(root, "local_shutdown", "emergency_runtime_minutes") != nil && cfg.LocalShutdown.EmergencyRuntimeMinutes <= 0 {
 		return MasterConfig{}, fmt.Errorf("local_shutdown.emergency_runtime_minutes must be greater than zero")
 	}
 	if cfg.LocalShutdown.EmergencyRuntimeMinutes == 0 {
@@ -283,6 +321,12 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if err := cfg.TLS.ValidateServer(); err != nil {
 		return MasterConfig{}, err
 	}
+	if (cfg.AdminTLS.CertFile == "") != (cfg.AdminTLS.KeyFile == "") {
+		return MasterConfig{}, fmt.Errorf("admin_tls.cert_file and admin_tls.key_file must be set together")
+	}
+	if err := validateInstallCAFile(cfg); err != nil {
+		return MasterConfig{}, err
+	}
 	if cfg.SNMP.Target == "" {
 		return MasterConfig{}, fmt.Errorf("snmp.target must not be empty")
 	}
@@ -295,17 +339,14 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if cfg.SNMP.TimeoutSeconds == 0 {
 		cfg.SNMP.TimeoutSeconds = 2
 	}
-	if cfg.SNMP.OutputSourceOID == "" {
-		cfg.SNMP.OutputSourceOID = defaultOutputSourceOID
+	if err := ResolveSNMPVars(&cfg.SNMP); err != nil {
+		return MasterConfig{}, err
 	}
-	if cfg.SNMP.ChargeOID == "" {
-		cfg.SNMP.ChargeOID = defaultChargeOID
+	if cfg.LocalShutdown.UnreachableAfter.Duration < 0 {
+		return MasterConfig{}, fmt.Errorf("local_shutdown.unreachable_after must not be negative")
 	}
-	if cfg.SNMP.RuntimeMinutesOID == "" {
-		cfg.SNMP.RuntimeMinutesOID = defaultRuntimeMinutesOID
-	}
-	if cfg.ShutdownPolicy.ShutdownReason == "" {
-		cfg.ShutdownPolicy.ShutdownReason = "UPS battery threshold reached"
+	if cfg.LocalShutdown.UnreachableAfter.Duration == 0 {
+		cfg.LocalShutdown.UnreachableAfter = cfg.LocalShutdown.MaxWait
 	}
 	if err := normalizeShutdownPolicies(&cfg); err != nil {
 		return MasterConfig{}, err
@@ -313,46 +354,26 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	return cfg, nil
 }
 
-func normalizeSNMPVersion(snmp *SNMPConfig) error {
-	switch snmp.Version {
-	case "":
-		snmp.Version = "2c"
-	case "1", "2c":
-	case "3":
-		return fmt.Errorf("snmp.version \"3\": SNMPv3 is not supported yet; use \"1\" or \"2c\"")
-	default:
-		return fmt.Errorf("snmp.version %q is invalid; use \"1\" or \"2c\"", snmp.Version)
+func validateInstallCAFile(cfg MasterConfig) error {
+	if cfg.InstallCAFile == "" {
+		return nil
+	}
+	if !cfg.TLS.EnabledForServer() {
+		return fmt.Errorf("install_ca_file requires TLS on the slave listener (tls.enabled)")
+	}
+	content, err := os.ReadFile(cfg.InstallCAFile)
+	if err != nil {
+		return fmt.Errorf("read install_ca_file: %w", err)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(content) {
+		return fmt.Errorf("install_ca_file %s contains no PEM certificate", cfg.InstallCAFile)
 	}
 	return nil
 }
 
-func hasWhenCondition(w ShutdownPolicyWhen) bool {
-	return w.OnBattery != nil || w.ChargeBelow > 0 || w.RuntimeBelow > 0
-}
-
 func normalizeShutdownPolicies(cfg *MasterConfig) error {
 	if len(cfg.ShutdownPolicies) == 0 {
-		// require_on_battery: false means "no battery requirement", i.e. an
-		// unset condition; &false would instead demand the UPS be on mains.
-		var onBattery *bool
-		if cfg.ShutdownPolicy.RequireOnBattery {
-			on := true
-			onBattery = &on
-		}
-		spec := ShutdownPolicySpec{
-			Name: "default",
-			When: ShutdownPolicyWhen{
-				OnBattery:    onBattery,
-				ChargeBelow:  cfg.ShutdownPolicy.MinBatteryCharge,
-				RuntimeBelow: cfg.ShutdownPolicy.MinRuntimeMinutes,
-			},
-			Target: ShutdownPolicyTarget{All: true},
-			Reason: cfg.ShutdownPolicy.ShutdownReason,
-		}
-		if !hasWhenCondition(spec.When) {
-			return fmt.Errorf("no shutdown condition configured: define shutdown_policies (or set require_on_battery/min_battery_charge/min_runtime_minutes in the legacy shutdown_policy)")
-		}
-		cfg.ShutdownPolicies = []ShutdownPolicySpec{spec}
+		return fmt.Errorf("shutdown_policies must define at least one policy")
 	}
 	seen := make(map[string]struct{}, len(cfg.ShutdownPolicies))
 	for i, p := range cfg.ShutdownPolicies {
@@ -363,11 +384,8 @@ func normalizeShutdownPolicies(cfg *MasterConfig) error {
 			return fmt.Errorf("shutdown_policies[%d].name %q is duplicated", i, p.Name)
 		}
 		seen[p.Name] = struct{}{}
-		if !hasWhenCondition(p.When) {
-			return fmt.Errorf("shutdown_policies[%d] (%q) must specify at least one when condition", i, p.Name)
-		}
-		if p.When.OnBattery != nil && !*p.When.OnBattery {
-			return fmt.Errorf("shutdown_policies[%d] (%q): when.on_battery: false is not supported; policies are only evaluated while the UPS is on battery, so remove it or set it to true", i, p.Name)
+		if err := validatePolicyConditions(p); err != nil {
+			return fmt.Errorf("shutdown_policies[%d] (%s).%w", i, p.Name, err)
 		}
 		if !p.Target.All && len(p.Target.Tags) == 0 && len(p.Target.NodeIDs) == 0 {
 			cfg.ShutdownPolicies[i].Target.All = true
@@ -379,9 +397,39 @@ func normalizeShutdownPolicies(cfg *MasterConfig) error {
 	return nil
 }
 
+// validatePolicyConditions returns errors starting with the offending key so
+// the caller can prefix the policy path.
+func validatePolicyConditions(p ShutdownPolicySpec) error {
+	when := p.When
+	if when.ChargeBelow < 0 || when.ChargeBelow > maxChargePercent {
+		return fmt.Errorf("when.charge_below must be between 0 and %d", maxChargePercent)
+	}
+	if when.RuntimeBelow < 0 {
+		return fmt.Errorf("when.runtime_below must not be negative")
+	}
+	if p.Duration.Duration < 0 {
+		return fmt.Errorf("duration must not be negative")
+	}
+	if when.UPSUnreachableFor.Duration < 0 {
+		return fmt.Errorf("when.ups_unreachable_for must not be negative")
+	}
+	if when.UPSUnreachableFor.Duration == 0 {
+		return nil
+	}
+	// The UPS gives no readings while unreachable, so other conditions could
+	// never be evaluated, and the timeout already acts as the duration.
+	if when.ChargeBelow != 0 || when.RuntimeBelow != 0 {
+		return fmt.Errorf("when.ups_unreachable_for cannot be combined with charge_below or runtime_below; put it in its own policy")
+	}
+	if p.Duration.Duration != 0 {
+		return fmt.Errorf("when.ups_unreachable_for cannot be combined with duration; it is already a duration")
+	}
+	return nil
+}
+
 func LoadSlaveConfig(path string) (SlaveConfig, error) {
 	var cfg SlaveConfig
-	if err := loadYAML(path, &cfg); err != nil {
+	if _, err := loadYAML(path, &cfg, nil); err != nil {
 		return SlaveConfig{}, err
 	}
 	if cfg.NodeID == "" {
@@ -435,13 +483,91 @@ func validateSecret(field, value string) error {
 	return nil
 }
 
-func loadYAML(path string, dst interface{}) error {
+// removedKey is a config key dropped by a breaking release. Path elements
+// are mapping keys; "*" matches every item of a sequence.
+type removedKey struct {
+	path []string
+	hint string
+}
+
+var removedMasterKeys = []removedKey{
+	{path: []string{"auth_tokens"}, hint: "use enrollment_tokens"},
+	{path: []string{"shutdown_policy"}, hint: "use shutdown_policies"},
+	{path: []string{"shutdown_policies", "*", "when", "on_battery"}, hint: "policies are only evaluated while on battery; delete it"},
+	{path: []string{"snmp", "output_source_oid"}, hint: "use snmp.profile or snmp.on_battery"},
+	{path: []string{"snmp", "charge_oid"}, hint: "use snmp.profile or snmp.charge"},
+	{path: []string{"snmp", "runtime_minutes_oid"}, hint: "use snmp.profile or snmp.runtime"},
+}
+
+// loadYAML decodes path into dst, rejecting unknown keys. removed keys are
+// checked first so they get an upgrade hint instead of the generic
+// "field not found". The returned root node lets callers tell an explicit
+// zero from an absent key.
+func loadYAML(path string, dst any, removed []removedKey) (*yaml.Node, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read config %s: %w", path, err)
+		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(content, dst); err != nil {
-		return fmt.Errorf("decode config %s: %w", path, err)
+	var root yaml.Node
+	if err := yaml.Unmarshal(content, &root); err != nil {
+		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
-	return nil
+	for _, key := range removed {
+		if node, label := lookupKey(&root, key.path, ""); node != nil {
+			return nil, fmt.Errorf("decode config %s: line %d: %s was removed in v0.6; %s (see docs/upgrade.md)", path, node.Line, label, key.hint)
+		}
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+	// io.EOF means an empty file; validation then reports the missing fields.
+	if err := decoder.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	return &root, nil
+}
+
+// lookupKey returns the key node at path and its dotted label with
+// sequence indexes filled in, e.g. "shutdown_policies[1].when.on_battery".
+func lookupKey(node *yaml.Node, path []string, label string) (*yaml.Node, string) {
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		return lookupKey(node.Content[0], path, label)
+	}
+	if path[0] == "*" {
+		if node.Kind != yaml.SequenceNode {
+			return nil, ""
+		}
+		for i, item := range node.Content {
+			if found, foundLabel := lookupKey(item, path[1:], fmt.Sprintf("%s[%d]", label, i)); found != nil {
+				return found, foundLabel
+			}
+		}
+		return nil, ""
+	}
+	if label != "" {
+		label += "."
+	}
+	label += path[0]
+	key, value := mappingEntry(node, path[0])
+	if key == nil || len(path) == 1 {
+		return key, label
+	}
+	return lookupKey(value, path[1:], label)
+}
+
+// findKey returns the key node at a path of mapping keys, or nil.
+func findKey(root *yaml.Node, path ...string) *yaml.Node {
+	node, _ := lookupKey(root, path, "")
+	return node
+}
+
+func mappingEntry(node *yaml.Node, key string) (*yaml.Node, *yaml.Node) {
+	if node.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i], node.Content[i+1]
+		}
+	}
+	return nil, nil
 }

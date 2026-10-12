@@ -1,6 +1,8 @@
 node_id: "slave-01"
 # 改成你的 master 地址(host:port)。这是占位值,不要直接使用。
 master_addr: "master.example:9000"
+# token: 首次注册用 master 的 enrollment token;注册成功后 master 签发的专属 token
+# 保存在 state_file 里,之后自动使用。通过装机脚本安装时这里直接是专属 token。
 token: "replace-with-strong-token"
 tags:
   - "web"

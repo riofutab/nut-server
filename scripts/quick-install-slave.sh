@@ -5,14 +5,14 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
   cat <<'EOF'
-usage: quick-install-slave.sh --node-id <node-id> --master-addr <host:port> --token <token> [install-slave options]
+usage: quick-install-slave.sh --node-id <node-id> --master-addr <host:port> --token-file <path> [install-slave options]
 
 Defaults:
   - TLS is disabled unless you pass any --tls-* option or --disable-tls yourself.
   - All remaining flags are forwarded to install-slave.sh unchanged.
 
 Example:
-  sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10:9000 --token your-token
+  sudo ./scripts/quick-install-slave.sh --node-id slave-01 --master-addr 10.0.0.10:9000 --token-file /root/nut-token
 EOF
 }
 

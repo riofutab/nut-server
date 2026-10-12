@@ -16,6 +16,8 @@ type persistedState struct {
 	LocalShutdown *localShutdownState              `json:"local_shutdown,omitempty"`
 	Commands      map[string]*shutdownCommandState `json:"commands,omitempty"`
 	Nodes         map[string]*NodeMeta             `json:"nodes,omitempty"`
+	// NodeTokens maps node_id to the hex SHA-256 of its issued token.
+	NodeTokens map[string]string `json:"node_tokens,omitempty"`
 }
 
 func (s *Server) loadState() {
@@ -47,6 +49,9 @@ func (s *Server) loadState() {
 	if state.Nodes != nil {
 		s.directory.replaceAll(state.Nodes)
 	}
+	if state.NodeTokens != nil {
+		s.nodeTokens = state.NodeTokens
+	}
 }
 
 func (s *Server) saveStateForDirectoryChange() {
@@ -72,6 +77,7 @@ func (s *Server) snapshotStateLocked() (uint64, []byte) {
 		LocalShutdown: persistedLocalShutdownState(s.localShutdown),
 		Commands:      s.commands,
 		Nodes:         s.directory.snapshotForPersist(),
+		NodeTokens:    s.nodeTokensSnapshot(),
 	}
 	content, err := json.Marshal(state)
 	if err != nil {

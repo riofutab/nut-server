@@ -6,7 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 NODE_ID=""
 MASTER_ADDR=""
-TOKEN=""
+TOKEN_FILE=""
 TAGS=""
 TLS_CERT_FILE=""
 TLS_KEY_FILE=""
@@ -18,11 +18,15 @@ TLS_DISABLED="false"
 
 usage() {
   cat <<'EOF'
-usage: install-slave.sh --node-id <node-id> --master-addr <host:port> --token <token> [--tags <comma-separated-tags>] [--disable-tls] [--tls-ca-file <path>] [--tls-server-name <name>] [--tls-cert-file <path> --tls-key-file <path>] [--tls-insecure-skip-verify]
+usage: install-slave.sh --node-id <node-id> --master-addr <host:port> --token-file <path> [--tags <comma-separated-tags>] [--disable-tls] [--tls-ca-file <path>] [--tls-server-name <name>] [--tls-cert-file <path> --tls-key-file <path>] [--tls-insecure-skip-verify]
+
+  --token-file <path>                file holding the token (kept off the command line); if
+                                     slave.yaml already exists its token is replaced
 
 TLS:
   --disable-tls                      force plain TCP and ignore all TLS certificate settings
-  --tls-ca-file <path>               CA bundle used to verify the master certificate
+  --tls-ca-file <path>               CA bundle used to verify the master certificate; copied
+                                     to /etc/nut-server/ca.crt
   --tls-server-name <name>           expected server name during certificate verification
   --tls-cert-file <path>             client certificate presented to master in mTLS mode
   --tls-key-file <path>              client private key presented to master in mTLS mode
@@ -40,8 +44,8 @@ while [ "$#" -gt 0 ]; do
       MASTER_ADDR="$2"
       shift 2
       ;;
-    --token)
-      TOKEN="$2"
+    --token-file)
+      TOKEN_FILE="$2"
       shift 2
       ;;
     --tags)
@@ -90,9 +94,22 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "$NODE_ID" ] || [ -z "$MASTER_ADDR" ] || [ -z "$TOKEN" ]; then
-  echo "--node-id, --master-addr and --token are required"
+if [ -z "$NODE_ID" ] || [ -z "$MASTER_ADDR" ] || [ -z "$TOKEN_FILE" ]; then
+  echo "--node-id, --master-addr and --token-file are required"
   usage
+  exit 1
+fi
+if [ ! -r "$TOKEN_FILE" ]; then
+  echo "--token-file $TOKEN_FILE is not readable" >&2
+  exit 1
+fi
+TOKEN=$(cat "$TOKEN_FILE")
+if [ -z "$TOKEN" ]; then
+  echo "--token-file $TOKEN_FILE is empty" >&2
+  exit 1
+fi
+if [ -n "$TLS_CA_FILE" ] && [ ! -r "$TLS_CA_FILE" ]; then
+  echo "--tls-ca-file $TLS_CA_FILE is not readable" >&2
   exit 1
 fi
 
@@ -110,7 +127,7 @@ reject_unsafe() {
 
 reject_unsafe "--node-id" "$NODE_ID" 'a-zA-Z0-9_.\-'
 reject_unsafe "--master-addr" "$MASTER_ADDR" 'a-zA-Z0-9_.\-:'
-reject_unsafe "--token" "$TOKEN" 'a-zA-Z0-9_.\-'
+reject_unsafe "--token-file contents" "$TOKEN" 'a-zA-Z0-9_.\-'
 if [ -n "$TAGS" ]; then
   reject_unsafe "--tags" "$TAGS" 'a-zA-Z0-9_.,\-'
 fi
@@ -207,9 +224,18 @@ if command -v visudo >/dev/null 2>&1; then
   visudo -c -f /etc/sudoers.d/nut-server-slave >/dev/null
 fi
 
+if [ -n "$TLS_CA_FILE" ]; then
+  install -o root -g root -m 0644 "$TLS_CA_FILE" /etc/nut-server/ca.crt
+  TLS_CA_FILE="/etc/nut-server/ca.crt"
+fi
+
 CONFIG_PATH="/etc/nut-server/slave.yaml"
 if [ -f "$CONFIG_PATH" ]; then
   echo "config $CONFIG_PATH already exists, skipping generation"
+  # The master issues a new token with every install script and drops the old
+  # one, so an existing config must take the new token to stay registered.
+  sed -i "s|^token:.*|token: \"$TOKEN\"|" "$CONFIG_PATH"
+  echo "replaced token in existing $CONFIG_PATH"
 else
   cat > "$CONFIG_PATH" <<EOF
 node_id: "$NODE_ID"
@@ -251,6 +277,11 @@ chmod 0640 "$CONFIG_PATH"
 
 install -m 0644 "$SERVICE_SOURCE" /etc/systemd/system/nut-slave.service
 systemctl daemon-reload
+
+if ! runuser -u nut-server -- /usr/local/bin/nut-slave -check-config -config "$CONFIG_PATH"; then
+  echo "config check failed; fix $CONFIG_PATH before starting nut-slave" >&2
+  exit 1
+fi
 
 echo "installed nut-slave"
 echo "run: systemctl enable --now nut-slave"

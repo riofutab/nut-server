@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"nut-server/internal/protocol"
-	"nut-server/internal/security"
 )
 
 func (s *Server) trackConn(conn net.Conn) {
@@ -53,9 +52,13 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	if !security.ValidateToken(s.cfg.AuthTokens, register.Token) {
-		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: "invalid token"})
-		slog.Warn("reject slave: invalid token", "node_id", register.NodeID, "peer", conn.RemoteAddr().String())
+	// issuedToken is set when this connection enrolls the node. It becomes the
+	// node's token only when the slave reports token_stored; if the connection
+	// drops first, or the slave predates per-node tokens, it is discarded.
+	issuedToken, err := s.authenticateNode(register.NodeID, register.Token)
+	if err != nil {
+		_ = client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: false, Message: err.Error()})
+		slog.Warn("reject slave", "node_id", register.NodeID, "peer", conn.RemoteAddr().String(), "reason", err)
 		recordRegisterAttempt("rejected")
 		return
 	}
@@ -79,12 +82,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	s.saveStateForDirectoryChange()
 
-	if err := client.Send(protocol.TypeRegisterAck, protocol.RegisterAckMessage{Accepted: true, Message: "registered"}); err != nil {
+	ack := protocol.RegisterAckMessage{Accepted: true, Message: "registered", IssuedToken: issuedToken}
+	if err := client.Send(protocol.TypeRegisterAck, ack); err != nil {
 		slog.Error("ack register failed", "node_id", client.NodeID, "err", err)
 		return
 	}
-	recordRegisterAttempt("accepted")
-	slog.Info("slave registered", "node_id", client.NodeID, "hostname", client.Hostname, "tags", client.Tags)
+	if issuedToken != "" {
+		recordRegisterAttempt("enrolled")
+	} else {
+		recordRegisterAttempt("accepted")
+	}
+	slog.Info("slave registered", "node_id", client.NodeID, "hostname", client.Hostname, "tags", client.Tags, "token_issued", issuedToken != "")
 	if err := s.replayPendingShutdown(client); err != nil {
 		slog.Error("replay pending shutdown failed", "node_id", client.NodeID, "err", err)
 		return
@@ -101,6 +109,19 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		client.Touch()
 		s.directory.Touch(client.NodeID, time.Now().UTC())
+		if env.Type == protocol.TypeTokenStored {
+			if issuedToken == "" {
+				slog.Warn("ignore token_stored without an issued token", "node_id", client.NodeID)
+				continue
+			}
+			if err := s.confirmIssuedToken(client.NodeID, issuedToken); err != nil {
+				slog.Warn("discard issued token", "node_id", client.NodeID, "err", err)
+				return
+			}
+			issuedToken = ""
+			slog.Info("slave enrolled", "node_id", client.NodeID)
+			continue
+		}
 		if err := s.handleEnvelope(client, env); err != nil {
 			slog.Error("handle envelope failed", "node_id", client.NodeID, "type", env.Type, "err", err)
 		}
@@ -150,7 +171,7 @@ func verifyPeerIdentity(conn net.Conn, nodeID string, enforce bool) error {
 // matchCertIdentity reports whether the leaf certificate binds nodeID via its
 // CommonName or a DNS SAN. An empty chain (token-only / plaintext peer that
 // happens to be enforced) is treated as a no-op so trust falls back to the
-// shared token; a present-but-mismatched certificate is a hard rejection.
+// node token; a present-but-mismatched certificate is a hard rejection.
 func matchCertIdentity(certs []*x509.Certificate, nodeID string) error {
 	if len(certs) == 0 {
 		return nil
