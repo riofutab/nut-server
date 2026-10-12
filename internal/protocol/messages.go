@@ -137,9 +137,19 @@ const (
 	NodeStateNeverSeen = "never_seen"
 )
 
+// UPS sources reported in UPSStatusView.Source.
+const (
+	UPSSourceSNMP = "snmp"
+	UPSSourceNUT  = "nut"
+)
+
+// UPSStatusView fields stay nil when the source does not report them;
+// LowBattery is only reported by the nut source.
 type UPSStatusView struct {
+	Source         string     `json:"source"`
 	Target         string     `json:"target"`
 	OnBattery      *bool      `json:"on_battery,omitempty"`
+	LowBattery     *bool      `json:"low_battery,omitempty"`
 	BatteryCharge  *int       `json:"battery_charge,omitempty"`
 	RuntimeMinutes *int       `json:"runtime_minutes,omitempty"`
 	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
@@ -162,6 +172,7 @@ const (
 	LocalShutdownTriggerWaitExpired      = "wait_expired"
 	LocalShutdownTriggerEmergencyRuntime = "emergency_runtime"
 	LocalShutdownTriggerUPSUnreachable   = "ups_unreachable"
+	LocalShutdownTriggerLowBattery       = "low_battery"
 )
 
 type LocalShutdownStatus struct {

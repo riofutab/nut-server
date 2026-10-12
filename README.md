@@ -6,7 +6,7 @@
 [![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](go.mod)
 
 > **Lightweight NUT-style UPS shutdown orchestrator for homelabs and small fleets.**
-> 轻量 NUT 风格 UPS 关机编排,适合 homelab 与小型机房:master 通过 SNMP 轮询 UPS, slave 主动注册并在策略命中时执行关机, 全程 mTLS / Bearer token / Prometheus 可观测、`.deb` / `.rpm` / `.tar.gz` 三件套发布。
+> 轻量 NUT 风格 UPS 关机编排,适合 homelab 与小型机房:master 通过 SNMP 或 NUT upsd 轮询 UPS, slave 主动注册并在策略命中时执行关机, 全程 mTLS / Bearer token / Prometheus 可观测、`.deb` / `.rpm` / `.tar.gz` 三件套发布。
 
 ## Quick start
 
@@ -41,7 +41,7 @@ slave 首次注册后,master 会给它签发专属 token,之后 enrollment token
 
 ```mermaid
 flowchart LR
-    UPS[("UPS\n(SNMP)")] -- poll --> M["nut-master\nlisten :9000\nadmin :9001"]
+    UPS[("UPS\n(SNMP / NUT upsd)")] -- poll --> M["nut-master\nlisten :9000\nadmin :9001"]
     M -- "shutdown\n(by tag / node_id / all)" --> S1["nut-slave\nweb-01"]
     M -- shutdown --> S2["nut-slave\ndb-01"]
     M -- shutdown --> S3["nut-slave\n..."]
@@ -53,7 +53,7 @@ flowchart LR
 
 仓库包含 master / slave 两个二进制、示例配置、systemd unit、安装脚本、Linux amd64/arm64 构建脚本,以及 GitHub Actions 工作流:每次 `v*` tag 都会自动生成 `.tar.gz` / `.deb` / `.rpm` 包并上传到 GitHub Release。最新版本是预发布版 [v0.6.0-rc.2](https://github.com/riofutab/nut-server/releases/tag/v0.6.0-rc.2)。
 
-UPS 读取由 `snmp.profile` 决定 OID:默认 `ups-mib`(RFC 1628 UPS-MIB),另有 `apc` / `cyberpower` / `eaton`;单项 OID 可用 `snmp.on_battery` / `snmp.charge` / `snmp.runtime` 覆盖。
+UPS 有两种读取方式,二选一:有网卡的 UPS 走 `snmp`,OID 由 `snmp.profile` 决定(默认 `ups-mib`,即 RFC 1628 UPS-MIB,另有 `apc` / `cyberpower` / `eaton`),单项 OID 可用 `snmp.on_battery` / `snmp.charge` / `snmp.runtime` 覆盖;只有 USB 口的 UPS 先由 NUT 的 upsd 接管,master 用 `nut` 从 upsd 读取。
 
 ## Table of Contents
 
@@ -83,6 +83,7 @@ UPS 读取由 `snmp.profile` 决定 OID:默认 `ups-mib`(RFC 1628 UPS-MIB),另�
 
 ### UPS 与关机决策
 - **SNMP UPS 轮询**: `snmp.profile` 预设 OID(`ups-mib` / `apc` / `cyberpower` / `eaton`),可逐项覆盖;支持 SNMP v1 / v2c / v3 (v0.6.0+);可选 `log_ups_status: true` 把成功轮询也写 journal
+- **NUT upsd 作为数据来源** (v0.7.0+): `nut` 从已有的 upsd 读 `ups.status` / `battery.charge` / `battery.runtime`,适合只有 USB 口的 UPS;UPS 不报电量或续航时,策略可用 `when.low_battery`(NUT 的 `LB` 标志)
 - **多策略组合关机条件** (v0.3.0+): `shutdown_policies` 列表, 内部 AND / 多条 OR, target 取并集, reason 拼接
 - **防抖与失联兜底** (v0.6.0+): 策略 `duration` 要求条件连续满足一段时间才触发;`when.ups_unreachable_for` 在断电期间 UPS 失联时触发
 - **断电周期 (episode)** (v0.5.2+): 策略只在 UPS 走电池时评估;同一次断电里后命中的策略并入同一条命令(先关 dev、续航低时再关全部),失败节点每 30s 重试,市电恢复后结束
@@ -205,7 +206,7 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `enrollment_tokens`（v0.6.0+）：slave 首次注册用的 token 列表。某个 `node_id` 首次注册成功后，master 给它签发专属 token，之后该 `node_id` 只能用专属 token 注册
 - `enrollment`（v0.6.0+）：`open`（默认）或 `closed`。`closed` 时新 `node_id` 注册会被拒（`enrollment closed`），已签发 token 的节点不受影响；`closed` 时 `enrollment_tokens` 可以留空
 - `poll_interval` / `command_timeout` / `offline_after` 必须大于 0；不写或写 0 时用默认值，负数启动失败
-- `poll_interval`: SNMP 轮询间隔
+- `poll_interval`: UPS 轮询间隔
 - `command_timeout`: shutdown 命令等待终态的最长时间，超时节点会记为 `timeout`
 - `offline_after`：节点 `last_seen` 超过该窗口后在 `/status` 中显示为 `offline`，默认 `45s`
 - `dry_run`: 是否仅验证链路而不执行真实关机
@@ -223,10 +224,12 @@ slave 注册到 master 后会出现在状态页的节点列表中，`state` 为 
 - `shutdown_policies`（**必填，至少一条**）: 关机策略。策略只在 UPS 走电池时评估。每条 policy 内部 AND, 多条 OR。命中多条时 target 取并集 (任一 `all:true` 则关全部; 否则 tags/node_ids 并集), reason 拼接成 `a; b`。字段:
   - `name` (必填, 唯一)
   - `when.charge_below` / `when.runtime_below`: 电量低于百分比 / 剩余运行时间低于分钟数。`when` 为空表示一走电池就触发。`charge_below` 取 1..100；显式写 `charge_below: 0`、`runtime_below: 0` 或 `ups_unreachable_for: 0s` 会被拒绝（要一走电池就触发就删掉该字段），`duration: 0s` 可以
-  - `when.ups_unreachable_for`（v0.6.0+）: 断电期间（最后一次成功读数显示走电池）UPS 连续这么久没有应答就触发。只能单独使用，不能与 `charge_below` / `runtime_below` 或 `duration` 组合。从最后一次成功读数开始计时；master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时，到时照常触发，并恢复对重启前那条关机命令的重放和重试。master 在这次断电中自己真实关机后再开机时，读到 UPS 之前不启用失联兜底
+  - `when.low_battery`（v0.7.0+，只能用于 `nut`）: upsd 的 `ups.status` 含 `LB`（UPS 自己判定电量低）时成立。只能写 `true`，可以和 `charge_below` / `runtime_below` 组合。UPS 不报 `battery.charge` / `battery.runtime` 时，依赖它们的条件永远不成立，master 在第一次读到这种数据时打一次 WARN
+  - `when.ups_unreachable_for`（v0.6.0+）: 断电期间（最后一次成功读数显示走电池）UPS 连续这么久没有应答就触发。只能单独使用，不能与 `charge_below` / `runtime_below` / `low_battery` 或 `duration` 组合。从最后一次成功读数开始计时；master 在断电期间重启、之后一直读不到 UPS 时，从 master 启动时刻开始计时，到时照常触发，并恢复对重启前那条关机命令的重放和重试。master 在这次断电中自己真实关机后再开机时，读到 UPS 之前不启用失联兜底
   - `duration`（v0.6.0+，默认 0 即立即触发）: 条件需连续满足这么久才触发。轮询失败不清零计时，也不触发；触发需要一次新的命中读数。master 重启或新的一次断电都会重新计时
   - `target.all` / `target.tags` / `target.node_ids` (全空 → 默认 `all:true`)
   - `reason` (可选, 缺省自动生成)
+- `snmp` 与 `nut` 二选一，两个都写或都不写会启动失败
 - `snmp.target` / `snmp.port` / `snmp.timeout_seconds`: UPS 地址、端口（默认 161）、超时秒数（1..60，不写或写 0 为 2）
 - `snmp.version`: `1`、`2c`（默认）或 `3`。`snmp.community` 只用于 v1 / v2c，v1 / v2c 下必填（留空启动失败），v3 下写了会启动失败
 - `snmp.profile`（v0.6.0+）: OID 预设，`ups-mib`（默认，RFC 1628）、`apc`、`cyberpower`、`eaton`。后三个厂商预设未经真机验证，上线前请用 `snmpget` 核对
@@ -253,6 +256,20 @@ snmp:
   auth_passphrase: "至少 8 个字符"
   priv_protocol: AES
   priv_passphrase: "至少 8 个字符"
+```
+
+- `nut`（v0.7.0+）: 从 NUT upsd 读取 UPS
+  - `nut.host`（必填）/ `nut.port`（默认 3493）: upsd 地址
+  - `nut.ups`（必填）: upsd 里的 UPS 名，即 `ups.conf` 里的段名（`upsc myups@host` 里的 `myups`）
+  - `nut.timeout_seconds`: 连接加读取的总超时，1..60，不写或写 0 为 2
+  - 每次轮询连一次 upsd、发 `LIST VAR`，然后 `LOGOUT`。读变量不需要登录，所以没有账号密码；upsd 要允许 master 连接（`upsd.conf` 的 `LISTEN`、防火墙）。不支持 STARTTLS，upsd 与 master 之间走明文
+  - `ups.status` 含 `OB` 视为走电池；既没有 `OL` 也没有 `OB`（例如驱动启动中）时本次轮询失败。`battery.runtime` 是秒，换算成分钟并向下取整；`battery.charge` 向下取整。upsd 返回 `DATA-STALE` / `DRIVER-NOT-CONNECTED` 时本次轮询失败
+  - master 不以 secondary 身份登录 upsd，upsd 主机上的 upsmon 关机时不会等 master。upsd 主机先关机后 master 读不到 UPS，由 `when.ups_unreachable_for` 和 `local_shutdown.unreachable_after` 处理；upsd 主机最好最后关（例如它本身就是 master，或由 nut-slave 管理）
+
+```yaml
+nut:
+  host: "127.0.0.1"
+  ups: "myups"
 ```
 
 ### slave
@@ -379,7 +396,7 @@ curl -fsSL https://raw.githubusercontent.com/riofutab/nut-server/master/scripts/
 包安装会自动建 `nut-server` 用户、装 sudoers、把配置目录设为 `root:nut-server`（服务只读），并在 master 首次安装时随机生成 `admin_token` 写入 `/etc/nut-server/master.yaml`。安装完成后还需要改配置、以服务用户校验，再启动：
 
 ```bash
-# master：补齐 enrollment_tokens、snmp.target 与 shutdown_policies
+# master：补齐 enrollment_tokens、snmp.target（或改用 nut）与 shutdown_policies
 sudo $EDITOR /etc/nut-server/master.yaml
 sudo -u nut-server /usr/local/bin/nut-master -check-config -config /etc/nut-server/master.yaml
 sudo systemctl enable --now nut-master
@@ -396,7 +413,7 @@ sudo systemctl enable --now nut-slave
 
 ### 方案 B：tar.gz + 预填配置脚本
 
-适合一次性预填 token、SNMP 目标等参数的场景：
+适合一次性预填 token、UPS 地址等参数的场景（UPS 走 NUT 时把 `--snmp-target` 换成 `--nut-ups myups@<upsd 主机>`）：
 
 ```bash
 # token 文件只需 root 可读，内容是 master 的 enrollment token
@@ -500,12 +517,13 @@ local_shutdown:
 - 远端全部完成（`remote_complete`）
 - 等待超过 `max_wait`（`wait_expired`）
 - UPS 剩余分钟 < `emergency_runtime_minutes`：先对仍在处理的远端补发一次关机指令，再立即关本机（`emergency_runtime`）
+- 断电期间 upsd 报 `LB`（只有 `nut`）：同上（`low_battery`，v0.7.0+）
 - 断电期间 UPS 连续 `local_shutdown.unreachable_after`（默认等于 `max_wait`）没有应答：同样先补发远端关机，再立即关本机（`ups_unreachable`，v0.6.0+）
 
 规则（v0.5.2+）：
 
 - 只有目标为全部节点的命令会启动等待流程；只关部分 tag / node_id 的命令（包括手动测试）不会关 master
-- 断电期间续航低于 `emergency_runtime_minutes`，或 UPS 失联超过 `unreachable_after` 时，即使没有任何策略触发、没有在线 slave，master 也会关本机
+- 断电期间续航低于 `emergency_runtime_minutes`、upsd 报 `LB`，或 UPS 失联超过 `unreachable_after` 时，即使没有任何策略触发、没有在线 slave，master 也会关本机
 - 命令带 `dry_run` 时本机关机只模拟
 - 市电恢复会取消尚未开始的本机关机；执行失败每 30s 重试一次
 
@@ -605,7 +623,7 @@ go test -tags e2e -count=1 ./internal/e2e/...
 
 - **群晖 SPK 包**: 单独出方案
 - **v0.7.0 master 作为 NUT 数据源**: 实现 upsd 协议的只读子集,让只能当 NUT client 的设备(群晖、QNAP、TrueNAS 等)挂到 master 上
-- **v0.7.0 NUT upsd 作为 UPS 数据来源**: 只有 USB 口的 UPS 通过现有 upsd 接入,与 SNMP 并列
+- **v0.7.0 NUT upsd 作为 UPS 数据来源**: 只有 USB 口的 UPS 通过现有 upsd 接入,与 SNMP 并列(已合入 master,待发布)
 - **v0.7.0 多 UPS 支持**: 一个 master 同时管多台 UPS,策略按 UPS 区分
 - **v0.7.0 slave 端失联兜底**: master 推送 UPS 状态,slave 与 master 失联且最后已知状态为走电池时本地关机(替代双 master HA)
 

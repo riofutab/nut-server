@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+计划发布为 v0.7.0。v0.6.0 在 `release/v0.6` 分支收尾,下方 [0.6.0] 段落随该分支发布。
+
+### Added
+- **NUT upsd 作为 UPS 数据来源**:新增 `nut`(`host` / `port` / `ups` / `timeout_seconds`),与 `snmp` 二选一。每次轮询发 `LIST VAR` 后 `LOGOUT`,不登录、不用账号密码。`ups.status` 含 `OB` 视为走电池,既无 `OL` 也无 `OB` 时轮询失败;`DATA-STALE` / `DRIVER-NOT-CONNECTED` 时轮询失败。
+- 策略条件 **`when.low_battery`**(只能用于 `nut`):upsd 报 `LB` 时成立。断电期间 upsd 报 `LB` 时 master 按紧急情况关本机,触发原因 `low_battery`。
+- `install-master.sh` / `quick-install-master.sh` 新增 `--nut-ups <ups>@<host>[:<port>]`,与 `--snmp-target` 二选一;生成的配置多一条 `low_battery` 策略。
+- `/status` 的 `ups` 新增 `source`(`snmp` / `nut`)和 `low_battery`;新指标 `nut_master_ups_low_battery`(只有 `nut`)。
+
+### Changed
+- UPS 不报 `battery.charge` / `battery.runtime` 时不再算轮询失败:依赖它们的策略条件和 `emergency_runtime_minutes` 不触发,master 第一次读到这种数据时打一次 WARN,`/status` 与对应指标不输出该值。
+
+## [0.6.0] - 未发布,在 release/v0.6 分支收尾
+
 计划发布为 v0.6.0,预发布版 v0.6.0-rc.2 供实机验证(取代 v0.6.0-rc.1)。所有破坏性配置变更集中在这一版,并包含下方 0.5.2 的全部修复(0.5.2 未单独发布)。**master 配置必须改写;先升 master 再升 slave。**逐字段对照见 [docs/upgrade.md](docs/upgrade.md)。
 
 ### Added

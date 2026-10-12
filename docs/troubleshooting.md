@@ -108,6 +108,24 @@ snmpget -v2c -c public <ups-host> .1.3.6.1.2.1.33.1.2.4.0   # 手动验证 OID
 - **电池状态或续航读数不对**:`on_battery.values` 要写该 OID 表示「走电池」的取值(UPS-MIB 是 5,APC / CyberPower 是 3);覆盖 `snmp.runtime` 时必须写 `runtime.unit`,且要与 OID 的单位一致(`minutes` / `seconds` / `timeticks`,TimeTicks 为 1/100 秒),读数统一换算成分钟并向下取整。OID 返回 TimeTicks 而 `unit` 不是 `timeticks` 时轮询失败,报 `set snmp.runtime.unit: timeticks`。
 - **数据陈旧**:`nut_master_ups_last_success_timestamp_seconds` 长时间不更新 → 轮询卡住或目标不可达。建议对 `time() - ups_last_success_timestamp_seconds > 3 * poll_interval` 告警。
 
+## NUT upsd 读不到数据(nut 数据源)
+
+```bash
+curl -s .../status | jq '.ups'          # source 为 nut,target 为 myups@host:port
+upsc myups@<upsd-host>                  # 在 master 上手动读,能读到才说明网络和 UPS 名都对
+```
+
+`last_error` 常见内容:
+- `connect upsd ...: connection refused` / 超时:upsd 没监听 master 能访问的地址。检查 `upsd.conf` 的 `LISTEN`(默认只听 127.0.0.1)和防火墙的 3493 端口。
+- `upsd does not serve a UPS named "..."`:`nut.ups` 要写 `ups.conf` 里的段名,用 `upsc -l <upsd-host>` 列出。
+- `upsd reports DATA-STALE` / `DRIVER-NOT-CONNECTED`:upsd 在跑,但驱动没数据。在 upsd 主机上查驱动(`upsdrvctl start`、`journalctl -u nut-driver*`)和 USB 连接。
+- `upsd denied access (ACCESS-DENIED)`:upsd 拒绝了 master 的地址。
+- `ups.status "..." has neither OL nor OB`:驱动刚启动或 UPS 处于自检等状态,本次轮询按失败处理,通常几次轮询后恢复。
+
+只有 `ups.status`、没有 `battery.charge` / `battery.runtime` 的 UPS(很多 `nutdrv_qx` / `blazer` 驱动的机型)也能用:master 第一次读到这种数据时打一次 `UPS does not report battery.runtime` 的 WARN,依赖缺失变量的策略条件和 `emergency_runtime_minutes` 不会触发。这类 UPS 用 `when.low_battery: true` 或「一走电池就触发」的策略,master 本机在 upsd 报 `LB` 时紧急关机。
+
+master 不登录 upsd,upsd 主机上的 upsmon 关机时不会等 master;upsd 主机先关机后 master 只能看到 UPS 失联,由 `when.ups_unreachable_for` 和 `local_shutdown.unreachable_after` 处理。
+
 ---
 
 ## 关机没有按预期触发
@@ -150,9 +168,9 @@ curl -s .../status | jq '.local_shutdown'   # phase / trigger / last_error
 
 - `waiting_remote`:仍在等远端 `executed`/`failed`。
 - `wait_expired`:超过 `max_wait` 兜底,准备关 master。
-- `emergency`:提前关本机。`trigger` 为 `emergency_runtime` 表示 UPS 续航低于 `emergency_runtime_minutes`;为 `ups_unreachable` 表示断电期间 UPS 连续 `local_shutdown.unreachable_after`(默认等于 `max_wait`)没有应答。后者先查 SNMP 连通性(见上文)。市电下 UPS 失联不会触发；master 在断电中自己关机后再开机时，读到 UPS 之前也不会触发。
+- `emergency`:提前关本机。`trigger` 为 `emergency_runtime` 表示 UPS 续航低于 `emergency_runtime_minutes`;为 `low_battery` 表示 upsd 报了 `LB`(只有 nut 数据源);为 `ups_unreachable` 表示断电期间 UPS 连续 `local_shutdown.unreachable_after`(默认等于 `max_wait`)没有应答。后者先查 SNMP 或 upsd 的连通性(见上文)。市电下 UPS 失联不会触发；master 在断电中自己关机后再开机时，读到 UPS 之前也不会触发。
 - `failed` + `last_error`:多半是 sudo 没放行。master 每 30s 重试一次。确认随包的 `/etc/sudoers.d/nut-server-master` 存在且 `visudo -c` 通过,命令为 `sudo -n /sbin/shutdown -h now`,并且 unit 是 v0.5.2+ 的版本(旧 unit 会隐式开启 NoNewPrivileges,sudo 无法提权)。`/status` 的 `local_shutdown.command_ready` 是启动时的自检结果。
-- 一直 `idle`:只有目标为全部节点的命令才会进入等待流程;只针对部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes` 或 UPS 失联超过 `unreachable_after` 时无论如何都会关 master。
+- 一直 `idle`:只有目标为全部节点的命令才会进入等待流程;只针对部分 tag / node_id 的命令不会关 master。断电期间续航低于 `emergency_runtime_minutes`、upsd 报 `LB` 或 UPS 失联超过 `unreachable_after` 时无论如何都会关 master。
 
 ---
 

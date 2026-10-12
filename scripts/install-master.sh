@@ -8,7 +8,8 @@ LISTEN_ADDR=":9000"
 ADMIN_LISTEN_ADDR="127.0.0.1:9001"
 TOKEN_FILE=""
 SNMP_TARGET=""
-SNMP_COMMUNITY="public"
+SNMP_COMMUNITY=""
+NUT_UPS=""
 TLS_CERT_FILE=""
 TLS_KEY_FILE=""
 TLS_CA_FILE=""
@@ -18,7 +19,7 @@ TLS_DISABLED="false"
 
 usage() {
   cat <<'EOF'
-usage: install-master.sh --token-file <path> --snmp-target <host> [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
+usage: install-master.sh --token-file <path> (--snmp-target <host> | --nut-ups <ups>@<host>[:<port>]) [--listen-addr <addr>] [--admin-listen-addr <addr>] [--snmp-community <community>] [--disable-tls] [--tls-cert-file <path> --tls-key-file <path>] [--tls-ca-file <path>] [--tls-require-client-cert]
 
   --token-file <path>            file holding the enrollment token new slaves first register
                                  with (kept off the command line); each node is then issued
@@ -26,6 +27,13 @@ usage: install-master.sh --token-file <path> --snmp-target <host> [--listen-addr
                                  POST /nodes/<node_id>/install-script.
 
   admin_token is generated on first install and kept in master.yaml.
+
+UPS source (exactly one):
+  --snmp-target <host>           UPS network card read over SNMP v2c
+  --snmp-community <community>   SNMP community (default: public)
+  --nut-ups <ups>@<host>[:<port>]
+                                 UPS served by a NUT upsd, in upsc notation
+                                 (port defaults to 3493)
 
 TLS:
   --disable-tls                  force plain TCP and ignore all TLS certificate settings
@@ -56,6 +64,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --snmp-community)
       SNMP_COMMUNITY="$2"
+      shift 2
+      ;;
+    --nut-ups)
+      NUT_UPS="$2"
       shift 2
       ;;
     --disable-tls)
@@ -95,9 +107,22 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "$TOKEN_FILE" ] || [ -z "$SNMP_TARGET" ]; then
-  echo "--token-file and --snmp-target are required"
+if [ -z "$TOKEN_FILE" ]; then
+  echo "--token-file is required"
   usage
+  exit 1
+fi
+if [ -z "$SNMP_TARGET" ] && [ -z "$NUT_UPS" ]; then
+  echo "one of --snmp-target or --nut-ups is required"
+  usage
+  exit 1
+fi
+if [ -n "$SNMP_TARGET" ] && [ -n "$NUT_UPS" ]; then
+  echo "--snmp-target and --nut-ups cannot be combined; pick the source the UPS is read from" >&2
+  exit 1
+fi
+if [ -n "$NUT_UPS" ] && [ -n "$SNMP_COMMUNITY" ]; then
+  echo "--snmp-community only applies to --snmp-target" >&2
   exit 1
 fi
 if [ ! -r "$TOKEN_FILE" ]; then
@@ -125,6 +150,49 @@ reject_unsafe() {
 reject_unsafe "--token-file contents" "$TOKEN" 'a-zA-Z0-9_.\-'
 reject_unsafe "--snmp-target" "$SNMP_TARGET" 'a-zA-Z0-9_.\-:'
 reject_unsafe "--snmp-community" "$SNMP_COMMUNITY" 'a-zA-Z0-9_.\-'
+reject_unsafe "--nut-ups" "$NUT_UPS" 'a-zA-Z0-9_.\-:@'
+
+if [ -n "$NUT_UPS" ]; then
+  case "$NUT_UPS" in
+    *@*) ;;
+    *)
+      echo "--nut-ups must look like <ups>@<host>[:<port>], e.g. myups@10.0.0.5" >&2
+      exit 1
+      ;;
+  esac
+  NUT_NAME=${NUT_UPS%%@*}
+  NUT_HOST=${NUT_UPS#*@}
+  NUT_PORT=3493
+  case "$NUT_HOST" in
+    *:*)
+      NUT_PORT=${NUT_HOST##*:}
+      NUT_HOST=${NUT_HOST%:*}
+      ;;
+  esac
+  # Exactly one @, a non-empty name and host, at most one ':' and a numeric
+  # port; IPv6 literals are not accepted here.
+  case "$NUT_NAME:$NUT_HOST:$NUT_PORT" in
+    :*|*::*|*@*)
+      echo "--nut-ups must look like <ups>@<host>[:<port>], e.g. myups@10.0.0.5" >&2
+      exit 1
+      ;;
+  esac
+  case "$NUT_HOST" in
+    *:*)
+      echo "--nut-ups must look like <ups>@<host>[:<port>], e.g. myups@10.0.0.5" >&2
+      exit 1
+      ;;
+  esac
+  case "$NUT_PORT" in
+    ''|*[!0-9]*)
+      echo "--nut-ups port must be a number" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ -n "$SNMP_TARGET" ] && [ -z "$SNMP_COMMUNITY" ]; then
+  SNMP_COMMUNITY="public"
+fi
 reject_unsafe "--listen-addr" "$LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
 reject_unsafe "--admin-listen-addr" "$ADMIN_LISTEN_ADDR" 'a-zA-Z0-9_.\-:'
 
@@ -254,6 +322,31 @@ if [ -f "$CONFIG_PATH" ]; then
 else
   ADMIN_TOKEN=$(random_token)
   echo "generated admin_token; see $CONFIG_PATH"
+  if [ -n "$NUT_UPS" ]; then
+    # Many USB UPSes report neither charge nor runtime; LB is the signal they
+    # all give.
+    EXTRA_POLICY='  - name: low-battery
+    when:
+      low_battery: true
+    target:
+      all: true
+    reason: "UPS reports low battery"'
+    UPS_BLOCK="nut:
+  host: \"$NUT_HOST\"
+  port: $NUT_PORT
+  ups: \"$NUT_NAME\"
+  timeout_seconds: 2"
+    UPS_SUMMARY="nut_ups=$NUT_NAME@$NUT_HOST:$NUT_PORT"
+  else
+    EXTRA_POLICY=""
+    UPS_BLOCK="snmp:
+  target: \"$SNMP_TARGET\"
+  port: 161
+  community: \"$SNMP_COMMUNITY\"
+  version: \"2c\"
+  timeout_seconds: 2"
+    UPS_SUMMARY="snmp_target=$SNMP_TARGET"
+  fi
   cat > "$CONFIG_PATH" <<EOF
 listen_addr: "$LISTEN_ADDR"
 admin_listen_addr: "$ADMIN_LISTEN_ADDR"
@@ -286,14 +379,10 @@ shutdown_policies:
     target:
       all: true
     reason: "UPS runtime low"
-snmp:
-  target: "$SNMP_TARGET"
-  port: 161
-  community: "$SNMP_COMMUNITY"
-  version: "2c"
-  timeout_seconds: 2
+$EXTRA_POLICY
+$UPS_BLOCK
 EOF
-  echo "generated $CONFIG_PATH for listen_addr=$LISTEN_ADDR snmp_target=$SNMP_TARGET"
+  echo "generated $CONFIG_PATH for listen_addr=$LISTEN_ADDR $UPS_SUMMARY"
 fi
 chown root:nut-server "$CONFIG_PATH"
 chmod 0640 "$CONFIG_PATH"

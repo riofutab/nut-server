@@ -102,7 +102,7 @@ func (u *fakeUPS) fail(err error) {
 	u.err = err
 }
 
-func (u *fakeUPS) read(config.SNMPConfig) (UPSStatus, error) {
+func (u *fakeUPS) read() (UPSStatus, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.err != nil {
@@ -169,14 +169,14 @@ func TestStagedPoliciesWidenTheEpisodeCommand(t *testing.T) {
 	dev := newFakeSlave(t, server, "dev-1", "dev")
 	web := newFakeSlave(t, server, "web-1", "web")
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 40, RuntimeMinutes: 30})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(40), RuntimeMinutes: new(30)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	first := dev.expectShutdown(t)
 	web.expectNothing(t)
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 30, RuntimeMinutes: 3})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(30), RuntimeMinutes: new(3)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestPoliciesAreNotEvaluatedOnLinePower(t *testing.T) {
 	})
 	slave := newFakeSlave(t, server, "node-1")
 
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 20, RuntimeMinutes: 10})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(20), RuntimeMinutes: new(10)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestAutoTriggerWithoutConnectedSlavesStillPowersOffMasterAtMaxWait(t *testi
 	calls := &localShutdownCalls{}
 	server.localShutdownRunner = calls.run
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestAutoTriggerWithoutConnectedSlavesStillPowersOffMasterAtMaxWait(t *testi
 		t.Fatalf("expected waiting_remote, got %q", status.LocalShutdown.Phase)
 	}
 
-	server.evaluateLocalShutdown(time.Now().UTC().Add(16*time.Minute), &UPSStatus{OnBattery: true, RuntimeMinutes: 60})
+	server.evaluateLocalShutdown(time.Now().UTC().Add(16*time.Minute), &UPSStatus{OnBattery: true, RuntimeMinutes: new(60)})
 
 	got := calls.snapshot()
 	if len(got) != 1 || got[0].trigger != protocol.LocalShutdownTriggerWaitExpired {
@@ -298,7 +298,7 @@ func TestFailedNodeIsRetriedAndLaterSuccessReplacesFailure(t *testing.T) {
 		},
 	})
 	slave := newFakeSlave(t, server, "node-1")
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestTagTargetedCommandAdoptsNodeThatReconnectsLater(t *testing.T) {
 		},
 	})
 	first := newFakeSlave(t, server, "dev-1", "dev")
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestRestoredEpisodeIsNotActedOnBeforeFirstUPSReading(t *testing.T) {
 		t.Fatalf("expected the restored local shutdown to wait for a reading, got %+v", got)
 	}
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 50, RuntimeMinutes: 20})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(50), RuntimeMinutes: new(20)})
 	pollAt(t, server, t0.Add(31*time.Minute))
 	go func() { _ = server.replayPendingShutdown(slave.client) }()
 	slave.expectShutdown(t)
@@ -380,13 +380,13 @@ func TestLinePowerEndsEpisodeAndCancelsPendingLocalShutdown(t *testing.T) {
 		},
 	})
 	slave := newFakeSlave(t, server, "node-1")
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
 	slave.expectShutdown(t)
 
-	ups.set(UPSStatus{OnBattery: false, BatteryCharge: 85, RuntimeMinutes: 55})
+	ups.set(UPSStatus{OnBattery: false, BatteryCharge: new(85), RuntimeMinutes: new(55)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestEmergencyRuntimePowersOffMasterWithoutAnyCommand(t *testing.T) {
 	})
 	calls := &localShutdownCalls{}
 	server.localShutdownRunner = calls.run
-	reading := UPSStatus{OnBattery: true, BatteryCharge: 15, RuntimeMinutes: 3}
+	reading := UPSStatus{OnBattery: true, BatteryCharge: new(15), RuntimeMinutes: new(3)}
 	ups.set(reading)
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
@@ -473,7 +473,7 @@ func TestAutoShutdownSupersedesActiveManualCommand(t *testing.T) {
 	slave.expectShutdown(t)
 	manual := <-done
 
-	ups.set(UPSStatus{OnBattery: true, BatteryCharge: 90, RuntimeMinutes: 60})
+	ups.set(UPSStatus{OnBattery: true, BatteryCharge: new(90), RuntimeMinutes: new(60)})
 	if err := server.evaluateUPS(time.Now().UTC()); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}

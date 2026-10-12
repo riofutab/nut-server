@@ -128,6 +128,7 @@ type masterSnapshotCollector struct {
 	server *Server
 
 	upsOnBattery      *prometheus.Desc
+	upsLowBattery     *prometheus.Desc
 	upsBatteryCharge  *prometheus.Desc
 	upsRuntimeMinutes *prometheus.Desc
 	upsLastSuccess    *prometheus.Desc
@@ -146,14 +147,19 @@ func newMasterSnapshotCollector(s *Server) *masterSnapshotCollector {
 			"1 when the UPS is on battery, 0 when on line power.",
 			nil, nil,
 		),
+		upsLowBattery: prometheus.NewDesc(
+			"nut_master_ups_low_battery",
+			"1 when NUT reports the LB (low battery) flag. Only exported for the nut source.",
+			nil, nil,
+		),
 		upsBatteryCharge: prometheus.NewDesc(
 			"nut_master_ups_battery_charge_percent",
-			"Latest UPS battery charge percentage from SNMP.",
+			"Latest UPS battery charge percentage. Absent when the UPS does not report it.",
 			nil, nil,
 		),
 		upsRuntimeMinutes: prometheus.NewDesc(
 			"nut_master_ups_runtime_minutes",
-			"Latest UPS remaining runtime in minutes from SNMP.",
+			"Latest UPS remaining runtime in minutes. Absent when the UPS does not report it.",
 			nil, nil,
 		),
 		upsLastSuccess: prometheus.NewDesc(
@@ -191,6 +197,7 @@ func newMasterSnapshotCollector(s *Server) *masterSnapshotCollector {
 
 func (c *masterSnapshotCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.upsOnBattery
+	ch <- c.upsLowBattery
 	ch <- c.upsBatteryCharge
 	ch <- c.upsRuntimeMinutes
 	ch <- c.upsLastSuccess
@@ -205,6 +212,9 @@ func (c *masterSnapshotCollector) Collect(ch chan<- prometheus.Metric) {
 	if ups := c.server.currentUPSStatus(); ups != nil {
 		if ups.OnBattery != nil {
 			ch <- prometheus.MustNewConstMetric(c.upsOnBattery, prometheus.GaugeValue, boolToFloat(*ups.OnBattery))
+		}
+		if ups.LowBattery != nil {
+			ch <- prometheus.MustNewConstMetric(c.upsLowBattery, prometheus.GaugeValue, boolToFloat(*ups.LowBattery))
 		}
 		if ups.BatteryCharge != nil {
 			ch <- prometheus.MustNewConstMetric(c.upsBatteryCharge, prometheus.GaugeValue, float64(*ups.BatteryCharge))

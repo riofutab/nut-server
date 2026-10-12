@@ -72,7 +72,15 @@ type MasterConfig struct {
 	TLS              TLSConfig            `yaml:"tls"`
 	LocalShutdown    LocalShutdownConfig  `yaml:"local_shutdown"`
 	ShutdownPolicies []ShutdownPolicySpec `yaml:"shutdown_policies"`
-	SNMP             SNMPConfig           `yaml:"snmp"`
+	// Exactly one of SNMP and NUT is configured; NUT.Host is set only when
+	// the UPS is read from a NUT upsd.
+	SNMP SNMPConfig `yaml:"snmp"`
+	NUT  NUTConfig  `yaml:"nut"`
+}
+
+// UsesNUT reports whether the UPS is read from a NUT upsd instead of SNMP.
+func (c MasterConfig) UsesNUT() bool {
+	return c.NUT.Host != ""
 }
 
 type AdminTLSConfig struct {
@@ -92,10 +100,12 @@ type ShutdownPolicySpec struct {
 
 // ShutdownPolicyWhen is evaluated only while the UPS is on battery, so an
 // empty When means "on battery". UPSUnreachableFor is exclusive: it fires when
-// the UPS has not answered for that long since a battery reading.
+// the UPS has not answered for that long since a battery reading. LowBattery
+// is the NUT "LB" status flag and needs the nut source.
 type ShutdownPolicyWhen struct {
 	ChargeBelow       int      `yaml:"charge_below"`
 	RuntimeBelow      int      `yaml:"runtime_below"`
+	LowBattery        bool     `yaml:"low_battery"`
 	UPSUnreachableFor Duration `yaml:"ups_unreachable_for"`
 }
 
@@ -351,22 +361,7 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 	if err := validateInstallCAFile(cfg); err != nil {
 		return MasterConfig{}, err
 	}
-	if cfg.SNMP.Target == "" {
-		return MasterConfig{}, fmt.Errorf("snmp.target must not be empty")
-	}
-	if cfg.SNMP.Port == 0 {
-		cfg.SNMP.Port = 161
-	}
-	if err := normalizeSNMPVersion(&cfg.SNMP); err != nil {
-		return MasterConfig{}, err
-	}
-	if cfg.SNMP.TimeoutSeconds == 0 {
-		cfg.SNMP.TimeoutSeconds = defaultSNMPTimeoutSeconds
-	}
-	if cfg.SNMP.TimeoutSeconds < 1 || cfg.SNMP.TimeoutSeconds > maxSNMPTimeoutSeconds {
-		return MasterConfig{}, fmt.Errorf("snmp.timeout_seconds must be between 1 and %d", maxSNMPTimeoutSeconds)
-	}
-	if err := ResolveSNMPVars(&cfg.SNMP); err != nil {
+	if err := normalizeUPSSource(&cfg, root); err != nil {
 		return MasterConfig{}, err
 	}
 	if cfg.LocalShutdown.UnreachableAfter.Duration < 0 {
@@ -379,6 +374,38 @@ func LoadMasterConfig(path string) (MasterConfig, error) {
 		return MasterConfig{}, err
 	}
 	return cfg, nil
+}
+
+// normalizeUPSSource validates whichever of snmp / nut is configured. Key
+// presence decides the source, so an empty nut block reports its missing host
+// instead of silently falling back to SNMP.
+func normalizeUPSSource(cfg *MasterConfig, root *yaml.Node) error {
+	hasSNMP := findKey(root, "snmp") != nil
+	hasNUT := findKey(root, "nut") != nil
+	switch {
+	case hasSNMP && hasNUT:
+		return fmt.Errorf("snmp and nut cannot both be configured; keep the one the UPS is read from")
+	case hasNUT:
+		return normalizeNUT(&cfg.NUT)
+	case !hasSNMP:
+		return fmt.Errorf("configure the UPS source: snmp (network card) or nut (NUT upsd)")
+	}
+	if cfg.SNMP.Target == "" {
+		return fmt.Errorf("snmp.target must not be empty")
+	}
+	if cfg.SNMP.Port == 0 {
+		cfg.SNMP.Port = 161
+	}
+	if err := normalizeSNMPVersion(&cfg.SNMP); err != nil {
+		return err
+	}
+	if cfg.SNMP.TimeoutSeconds == 0 {
+		cfg.SNMP.TimeoutSeconds = defaultSNMPTimeoutSeconds
+	}
+	if cfg.SNMP.TimeoutSeconds < 1 || cfg.SNMP.TimeoutSeconds > maxSNMPTimeoutSeconds {
+		return fmt.Errorf("snmp.timeout_seconds must be between 1 and %d", maxSNMPTimeoutSeconds)
+	}
+	return ResolveSNMPVars(&cfg.SNMP)
 }
 
 func validateInstallCAFile(cfg MasterConfig) error {
@@ -430,6 +457,9 @@ func normalizeShutdownPolicies(cfg *MasterConfig, root *yaml.Node) error {
 		if err := validatePolicyConditions(p, node); err != nil {
 			return fmt.Errorf("shutdown_policies[%d] (%s).%w", i, p.Name, err)
 		}
+		if p.When.LowBattery && !cfg.UsesNUT() {
+			return fmt.Errorf("shutdown_policies[%d] (%s).when.low_battery needs the nut source; SNMP readings carry no low-battery flag", i, p.Name)
+		}
 		if !p.Target.All && len(p.Target.Tags) == 0 && len(p.Target.NodeIDs) == 0 {
 			cfg.ShutdownPolicies[i].Target.All = true
 		}
@@ -459,6 +489,9 @@ func validatePolicyConditions(p ShutdownPolicySpec, node *yaml.Node) error {
 			return fmt.Errorf("when.%s must be greater than 0; remove it to fire on any battery reading", c.key)
 		}
 	}
+	if node != nil && findKey(node, "when", "low_battery") != nil && !when.LowBattery {
+		return fmt.Errorf("when.low_battery must be true; remove it to fire on any battery reading")
+	}
 	if when.ChargeBelow < 0 || when.ChargeBelow > maxChargePercent {
 		return fmt.Errorf("when.charge_below must be between 1 and %d", maxChargePercent)
 	}
@@ -476,8 +509,8 @@ func validatePolicyConditions(p ShutdownPolicySpec, node *yaml.Node) error {
 	}
 	// The UPS gives no readings while unreachable, so other conditions could
 	// never be evaluated, and the timeout already acts as the duration.
-	if when.ChargeBelow != 0 || when.RuntimeBelow != 0 {
-		return fmt.Errorf("when.ups_unreachable_for cannot be combined with charge_below or runtime_below; put it in its own policy")
+	if when.ChargeBelow != 0 || when.RuntimeBelow != 0 || when.LowBattery {
+		return fmt.Errorf("when.ups_unreachable_for cannot be combined with charge_below, runtime_below or low_battery; put it in its own policy")
 	}
 	if p.Duration.Duration != 0 {
 		return fmt.Errorf("when.ups_unreachable_for cannot be combined with duration; it is already a duration")

@@ -634,8 +634,8 @@ func TestStatusIncludesLatestUPSState(t *testing.T) {
 
 	server.recordUPSSuccess(UPSStatus{
 		OnBattery:      true,
-		BatteryCharge:  24,
-		RuntimeMinutes: 11,
+		BatteryCharge:  new(24),
+		RuntimeMinutes: new(11),
 	}, successAt)
 	server.recordUPSError(errors.New("snmp timeout"), errorAt)
 
@@ -851,8 +851,8 @@ func TestEmergencyRuntimeTriggersFinalReplayAndLocalShutdown(t *testing.T) {
 
 	server.evaluateLocalShutdown(now.Add(1*time.Minute), &UPSStatus{
 		OnBattery:      true,
-		BatteryCharge:  10,
-		RuntimeMinutes: 5,
+		BatteryCharge:  new(10),
+		RuntimeMinutes: new(5),
 	})
 
 	env := readEnvelopeFromConn(t, peer)
@@ -932,8 +932,8 @@ func TestRecordUPSSuccessLogsWhenEnabled(t *testing.T) {
 
 	server.recordUPSSuccess(UPSStatus{
 		OnBattery:      false,
-		BatteryCharge:  95,
-		RuntimeMinutes: 42,
+		BatteryCharge:  new(95),
+		RuntimeMinutes: new(42),
 	}, time.Now().UTC())
 
 	output := logOutput.String()
@@ -953,8 +953,8 @@ func TestRecordUPSSuccessSkipsLogWhenDisabled(t *testing.T) {
 
 	server.recordUPSSuccess(UPSStatus{
 		OnBattery:      false,
-		BatteryCharge:  95,
-		RuntimeMinutes: 42,
+		BatteryCharge:  new(95),
+		RuntimeMinutes: new(42),
 	}, time.Now().UTC())
 
 	if strings.Contains(logOutput.String(), "ups status") {
@@ -1295,7 +1295,7 @@ func TestRunFillsSNMPDefaultsForConfigNotFromLoader(t *testing.T) {
 		AdminListenAddr: "127.0.0.1:0",
 		PollInterval:    config.Duration{Duration: time.Hour},
 	})
-	server.upsReader = func(config.SNMPConfig) (UPSStatus, error) { return UPSStatus{}, errors.New("no ups") }
+	server.upsReader = func() (UPSStatus, error) { return UPSStatus{}, errors.New("no ups") }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx) }()
@@ -1334,6 +1334,7 @@ func TestIndexLabelsEveryLocalShutdownPhaseAndTrigger(t *testing.T) {
 		protocol.LocalShutdownTriggerWaitExpired,
 		protocol.LocalShutdownTriggerEmergencyRuntime,
 		protocol.LocalShutdownTriggerUPSUnreachable,
+		protocol.LocalShutdownTriggerLowBattery,
 	} {
 		if !strings.Contains(body, "  "+key+": ") {
 			t.Errorf("status page has no label for %q", key)
